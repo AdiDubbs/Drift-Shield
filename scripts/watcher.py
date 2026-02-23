@@ -119,12 +119,24 @@ def _eval_candidate(w: WatcherCfg, candidate_version: str, active_version: str) 
 
     def _score_version(version: str) -> Dict[str, float]:
         vdir = w.versions_dir / version
-        model = xgb.XGBClassifier()
-        model.load_model(str(vdir / "xgb_model.json"))
+        # Load booster directly to avoid sklearn wrapper metadata issues
+        booster = xgb.Booster()
+        booster.load_model(str(vdir / "xgb_model.json"))
+        
         calibrator = joblib.load(str(vdir / "proba_calibrator.joblib"))
         calib = load_calib(str(vdir / "qhat.npy"), str(vdir / "calib_meta.json"))
 
-        probas = calibrator.predict_proba(model.predict_proba(X))
+        # Use DMatrix for prediction
+        dm = xgb.DMatrix(X, feature_names=test_df.drop(columns=[target_col]).columns.tolist())
+        raw_probas = booster.predict(dm)
+        
+        # Booster.predict returns p1 for binary, so we need [p0, p1]
+        if raw_probas.ndim == 1:
+            raw_probas_2col = np.vstack([1.0 - raw_probas, raw_probas]).T
+        else:
+            raw_probas_2col = raw_probas
+
+        probas = calibrator.predict_proba(raw_probas_2col)
         total_cost = abstain = correct = kept = 0
 
         for i in range(len(y)):

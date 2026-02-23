@@ -18,6 +18,37 @@ Fraud detection API with real-time drift monitoring, uncertainty-aware predictio
   <img src="frontend_new/src/assets/3_drift.jpeg" width="800" alt="Activity Log" />
 </div>
 
+## Quickstart (Docker)
+
+The fastest way to run the full stack (API + Dashboard + Monitoring):
+
+```bash
+docker compose --profile monitoring up --build
+```
+
+**Services:**
+- **Frontend:** http://localhost:5173
+- **API Docs:** http://localhost:8000/docs
+- **Grafana:** http://localhost:3000/d/afe3285cd4xkwc/drift-shield (user/pass: `admin`/`admin`)
+- **Prometheus:** http://localhost:9090
+
+> **Note:** The API container will bootstrap an initial model on startup. If you want to use your own data, place `creditcard.csv` in `data/raw/` before starting.
+
+## Local Development
+
+If you prefer to run services manually:
+
+1. **Install Dependencies**
+   ```bash
+   pip install -r requirements.txt
+   cd frontend_new && bun install
+   ```
+
+2. **Start the Stack**
+   ```bash
+   ./dev.sh
+   ```
+
 ## Stack
 
 | Layer | Tech |
@@ -29,69 +60,6 @@ Fraud detection API with real-time drift monitoring, uncertainty-aware predictio
 | Frontend | React + Vite + Tailwind (`frontend_new/`) |
 | Metrics | Prometheus (+ optional Grafana) |
 
-## Requirements
-
-- Python 3.12+
-- Bun 1.3+ (for `frontend_new`)
-- Prometheus binary on PATH (for `./dev.sh`) or Docker
-
-## Quickstart (Local)
-
-1. Place base training dataset
-
-Put the credit card fraud training CSV at:
-
-`data/raw/creditcard.csv`
-
-Dataset: https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
-
-2. Add IEEE dataset for live visualization traffic (recommended)
-
-Put IEEE-CIS files in:
-
-`ieee-fraud-detection/`
-
-Required at minimum:
-
-- `ieee-fraud-detection/train_transaction.csv`
-
-3. Install dependencies
-
-```bash
-pip install -r requirements.txt
-cd frontend_new && bun install
-cd ..
-```
-
-4. Start the stack
-
-```bash
-./dev.sh
-```
-
-`dev.sh` will:
-
-- Use `data/raw/creditcard.csv` as the training dataset
-- Bootstrap an initial model if missing (`scripts/setup.py`)
-- Start API, Prometheus, and frontend
-- If IEEE data exists, prepare `data/processed/ieee_adapted.csv` and start continuous traffic to `/predict`
-
-5. (Optional) Run watcher for retrain processing
-
-```bash
-PYTHONPATH=src python scripts/watcher.py
-```
-
-## Service URLs
-
-| Service | URL |
-|---|---|
-| API | http://localhost:8000 |
-| OpenAPI Docs | http://localhost:8000/docs |
-| Frontend | http://localhost:5173 |
-| Prometheus | http://localhost:9090 |
-| Metrics endpoint | http://localhost:8000/metrics |
-
 ## Core API Endpoints
 
 - `GET /health`
@@ -101,7 +69,7 @@ PYTHONPATH=src python scripts/watcher.py
 - `GET /models/info`
 - `GET /prometheus/{path}`
 
-## Docker
+## Docker Details
 
 Start API + watcher + frontend + Prometheus + IEEE traffic:
 
@@ -109,29 +77,14 @@ Start API + watcher + frontend + Prometheus + IEEE traffic:
 docker compose up --build
 ```
 
-The API container runs `scripts/bootstrap_demo.py` on startup and trains an initial model if needed, using:
-- `data/raw/creditcard.csv`
-
 The `ieee_traffic` service:
-
-- prepares `data/processed/ieee_adapted.csv` from `ieee-fraud-detection/train_transaction.csv` (if not already cached)
+- prepares `data/processed/ieee_adapted.csv` from `ieee-fraud-detection/train_transaction.csv` (if provided)
 - continuously sends traffic to `POST /predict` so charts stay populated
-
-Start with full monitoring stack (adds Grafana):
-
-```bash
-docker compose --profile monitoring up --build
-```
-
-Grafana (when monitoring profile is enabled):
-- URL: `http://localhost:3000/d/afe3285cd4xkwc/drift-shield?orgId=1&from=now-15m&to=now&timezone=browser&refresh=5s`
-- Default user/password: `admin` / `admin`
 
 ## Dashboard Data Notes
 
-- If values are empty, it usually means request traffic is not flowing.
-- In Docker, check `driftshield_ieee_traffic` is running.
-- Local `dev.sh` only streams IEEE traffic when `ieee-fraud-detection/train_transaction.csv` exists.
+- If values are empty, ensure request traffic is flowing.
+- In Docker, check `driftshield_ieee_traffic` container status.
 
 ## Project Structure
 
