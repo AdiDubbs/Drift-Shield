@@ -1,0 +1,19 @@
+[project]
+name = "drift_shield"
+version = "0.1.0"
+description = "Fraud detection with drift monitoring and automated retraining"
+readme = "ABOUT.md"
+requires-python = ">=3.12"
+authors = [
+    {name = "Aditya Dubey"}
+]
+
+# Note: Dependencies are managed in requirements.txt
+# Install with: pip install -r requirements.txt
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

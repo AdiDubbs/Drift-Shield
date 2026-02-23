@@ -1,0 +1,86 @@
+project:
+  name: "Drift_Shield"
+  random_seed: 1337
+
+data:
+  raw_csv_path: "data/raw/creditcard.csv"
+  target_col: "Class"
+  drop_cols: ["Time"]
+
+split:
+  train_frac: 0.70
+  calib_frac: 0.15
+  test_frac: 0.15
+
+model:
+  kind: "xgboost"
+  params:
+    max_depth: 5
+    n_estimators: 400
+    learning_rate: 0.05
+    subsample: 0.9
+    colsample_bytree: 0.9
+    reg_lambda: 1.0
+    n_jobs: 4
+    eval_metric: "logloss"
+
+conformal:
+  alpha: 0.05
+  labels: ["non_fraud", "fraud"]
+
+schema:
+  version: 1
+  allow_extras: false
+
+drift:
+  window_size: 1000
+  stride: 200
+  soft_threshold: 0.20
+  hard_threshold: 0.30
+  p_value_threshold: 0.01
+  required_hard_windows: 3
+
+  psi_soft_threshold: 0.10
+  psi_hard_threshold: 0.25
+
+shadow:
+  model_version: null
+  sampling_rate: 0.20
+
+paths:
+  model_path: "artifacts/models/xgb_model.json"
+  qhat_path: "artifacts/conformal/qhat.npy"
+  calib_meta_path: "artifacts/conformal/calib_meta.json"
+  drift_ref_path: "artifacts/drift/reference.json"
+
+  repo_root: "."
+  versions_dir: "artifacts/models/versions"
+  active_ptr: "artifacts/models/ACTIVE_MODEL.json"
+  shadow_ptr: "artifacts/models/SHADOW_MODEL.json"
+
+  rollback_ptr: "artifacts/models/ROLLBACK_MODEL.json"
+  manifest_path: "artifacts/models/manifest.json"
+
+  retrain_requests_dir: "artifacts/retrain_requests"
+  reports_dir: "artifacts/reports"
+
+retrain:
+  cooldown_seconds: 600
+  max_pending: 1
+  old_data_ratio: 0.7
+
+
+promote:
+  auto_promote: true
+  poll_seconds: 1.0
+  cooldown_seconds: 120
+
+  min_auc_delta: -0.002
+  min_f1_delta: -0.002
+  max_cost_increase: 0.05
+  require_cost_metric: false
+
+eval:
+  fp_cost: 1.0
+  fn_cost: 10.0
+  abstain_cost: 0.2

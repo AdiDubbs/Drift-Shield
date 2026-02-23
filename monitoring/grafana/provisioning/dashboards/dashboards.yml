@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: "DriftShield"
+    orgId: 1
+    folder: "DriftShield"
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

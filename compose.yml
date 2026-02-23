@@ -1,0 +1,111 @@
+services:
+  api:
+    build:
+      context: .
+      target: api
+    container_name: driftshield_api
+    command: ["sh", "-c", "python scripts/bootstrap_demo.py && uvicorn fraud_service.api.main:app --host 0.0.0.0 --port 8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - PYTHONPATH=/app/src
+      - PROMETHEUS_URL=http://prometheus:9090
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  watcher:
+    build:
+      context: .
+      target: api
+    container_name: driftshield_watcher
+    command: ["python", "scripts/watcher.py"]
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - PYTHONPATH=/app/src
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ieee_traffic:
+    build:
+      context: .
+      target: api
+    container_name: driftshield_ieee_traffic
+    command:
+      [
+        "sh",
+        "-c",
+        "if [ ! -f data/processed/ieee_adapted.csv ]; then python scripts/ieee_adapter.py prepare --sample ${IEEE_SAMPLE:-20000}; fi && python scripts/traffic_loop.py --url http://api:8000 --csv data/processed/ieee_adapted.csv --sleep ${IEEE_TRAFFIC_SLEEP:-0.2}",
+      ]
+    volumes:
+      - ./data:/app/data
+      - ./ieee-fraud-detection:/app/ieee-fraud-detection:ro
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - PYTHONPATH=/app/src
+      - IEEE_SAMPLE=20000
+      - IEEE_TRAFFIC_SLEEP=0.2
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      target: frontend
+    container_name: driftshield_frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: driftshield_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: driftshield_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_DISABLE_LOGIN_FORM=false
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_SECURITY_COOKIE_SAMESITE=none
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  grafana_data:
