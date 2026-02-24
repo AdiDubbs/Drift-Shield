@@ -5,19 +5,16 @@ import {
 } from 'recharts'
 import {
   ChartCard,
+  ChartStatePane,
   CustomTooltip,
   TimeRangeToggle,
   CHART_COMMON,
   LINE_COLORS,
   CHART_AXIS_TICK,
   CHART_GRID_STROKE,
+  StatusBadge,
+  getDriftStatusMeta,
 } from './shared'
-
-const EmptyState = ({ height = 180 }) => (
-  <div className="flex items-center justify-center rounded-md bg-muted/30" style={{ height }}>
-    <p className="typo-body-sm text-muted-foreground">Waiting for data…</p>
-  </div>
-)
 
 const ChartLegend = ({ items }) => (
   <div className="flex items-center gap-4 pt-1">
@@ -66,17 +63,16 @@ export default function OperationsTab({
   const fraudP50 = lastFraud?.p50 != null ? lastFraud.p50.toFixed(3) : '—'
 
   const driftVal = lastChart?.drift ?? 0
-  const driftAccent =
-    driftVal >= driftCritical ? 'var(--accent-crimson-vibrant)' :
-    driftVal >= driftWarning ? 'var(--accent-amber-vibrant)' :
-    'var(--accent-steel-vibrant)'
-
+  const driftStatus = getDriftStatusMeta(driftVal, driftWarning, driftCritical)
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="typo-title text-text-primary">Monitoring</h1>
           <p className="typo-subtitle text-text-dimmed mt-1">Latency, throughput, and drift telemetry</p>
+          <div className="mt-2">
+            <StatusBadge status={driftStatus} />
+          </div>
         </div>
         <div className="pt-1">
           <TimeRangeToggle value={timeRange} onChange={setTimeRange} />
@@ -87,13 +83,18 @@ export default function OperationsTab({
         <StatStrip label="p50 Latency" value={latencyP50} unit="ms" />
         <StatStrip label="p99 Latency" value={latencyP99} unit="ms" accent="var(--accent-amber-vibrant)" />
         <StatStrip label="Request Rate" value={currentRps} unit="req/s" />
-        <StatStrip label="Drift Score" value={driftPct} unit="%" accent={driftAccent} />
+        <StatStrip
+          label="Drift Score"
+          value={driftPct}
+          unit="%"
+          accent={driftStatus.label === 'Nominal' ? 'var(--accent-mint-vibrant)' : undefined}
+        />
         <StatStrip label="Fraud p50" value={fraudP50} />
       </div>
 
       <div className="grid grid-cols-2 gap-4">
         <ChartCard title="Latency (ms)">
-          {latencyChartData.length === 0 ? <EmptyState /> : (
+          {latencyChartData.length === 0 ? <ChartStatePane state={metrics.chartStates.latency} onRetry={metrics.refresh} /> : (
             <ResponsiveContainer width="100%" height={260}>
               <LineChart data={latencyChartData} {...CHART_COMMON}>
                 <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID_STROKE} vertical={false} />
@@ -114,7 +115,7 @@ export default function OperationsTab({
         </ChartCard>
 
         <ChartCard title="Drift Score">
-          {chartData.length === 0 ? <EmptyState /> : (
+          {chartData.length === 0 ? <ChartStatePane state={metrics.chartStates.drift} onRetry={metrics.refresh} /> : (
             <ResponsiveContainer width="100%" height={260}>
               <AreaChart data={chartData} {...CHART_COMMON}>
                 <defs>
@@ -141,7 +142,7 @@ export default function OperationsTab({
         </ChartCard>
 
         <ChartCard title="Request Rate (req/s)">
-          {chartData.length === 0 ? <EmptyState /> : (
+          {chartData.length === 0 ? <ChartStatePane state={metrics.chartStates.requestRate} onRetry={metrics.refresh} /> : (
             <ResponsiveContainer width="100%" height={260}>
               <AreaChart data={chartData} {...CHART_COMMON}>
                 <defs>
@@ -164,7 +165,7 @@ export default function OperationsTab({
         </ChartCard>
 
         <ChartCard title="Fraud Probability">
-          {fraudProbChartData.length === 0 ? <EmptyState /> : (
+          {fraudProbChartData.length === 0 ? <ChartStatePane state={metrics.chartStates.fraud} onRetry={metrics.refresh} /> : (
             <ResponsiveContainer width="100%" height={260}>
               <LineChart data={fraudProbChartData} {...CHART_COMMON}>
                 <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID_STROKE} vertical={false} />

@@ -6,20 +6,24 @@ import {
 import { cn } from '../lib/utils'
 import {
   StatCard, ChartCard, CustomTooltip, TimeRangeToggle,
-  CHART_COMMON, LINE_COLORS, CHART_AXIS_TICK, CHART_GRID_STROKE,
+  CHART_COMMON, LINE_COLORS, CHART_AXIS_TICK, CHART_GRID_STROKE, ChartStatePane, getDriftStatusMeta,
 } from './shared'
 
 export default function OverviewTab({
-  stats, metrics, driftScore, coverageGuarantee, rps, timeRange, setTimeRange,
+  stats,
+  metrics,
+  driftScore,
+  coverageGuarantee,
+  rps,
+  timeRange,
+  setTimeRange,
+  driftWarning = 0.5,
+  driftCritical = 0.7,
 }) {
   const { fraudProbChartData, chartData, currentMetrics } = metrics
 
   const driftPct = ((driftScore ?? 0) * 100).toFixed(1)
-  const driftStatus = driftScore >= 0.7 ? 'ALERT' : driftScore >= 0.5 ? 'WARN' : 'OPTIMAL'
-  const driftAccent =
-    driftScore >= 0.7 ? 'text-crimson' :
-    driftScore >= 0.5 ? 'text-amber-accent' : 'text-mint'
-
+  const driftStatus = getDriftStatusMeta(driftScore, driftWarning, driftCritical)
   const coverage = coverageGuarantee != null
     ? `${(coverageGuarantee * 100).toFixed(1)}`
     : null
@@ -29,6 +33,9 @@ export default function OverviewTab({
       <div>
         <h1 className="typo-title text-text-primary">Overview</h1>
         <p className="typo-subtitle text-text-dimmed mt-1">Real-time model health &amp; fraud detection summary</p>
+        <p className="typo-caption text-text-dimmed mt-2">
+          Drift state uses a single policy: <span className="text-text-primary">Nominal</span> below {(driftWarning * 100).toFixed(0)}%, <span className="text-text-primary">Warning</span> at {(driftWarning * 100).toFixed(0)}%+, and <span className="text-text-primary">Critical</span> at {(driftCritical * 100).toFixed(0)}%+ (retrain risk).
+        </p>
       </div>
 
       <div className="card card-glass grid grid-cols-3 divide-x divide-white/[0.07]">
@@ -44,9 +51,8 @@ export default function OverviewTab({
           label="Drift Score"
           value={driftPct}
           unit="%"
-          accentClass={driftAccent}
           sub={`${currentMetrics.featureDriftSoft} soft · ${currentMetrics.featureDriftHard} hard features`}
-          tooltip="How much incoming transaction patterns have shifted from training data. Above 70% triggers a retrain."
+          tooltip={`How much incoming transaction patterns have shifted from training data. Above ${(driftCritical * 100).toFixed(0)}% triggers a retrain.`}
           status={driftStatus}
           hero
           delay={2}
@@ -68,7 +74,7 @@ export default function OverviewTab({
           action={<TimeRangeToggle value={timeRange} onChange={setTimeRange} />}
         >
           {fraudProbChartData.length === 0 ? (
-            <EmptyState />
+            <ChartStatePane state={metrics.chartStates.fraud} onRetry={metrics.refresh} height={380} />
           ) : (
             <ResponsiveContainer width="100%" height={380}>
               <LineChart data={fraudProbChartData} {...CHART_COMMON}>
@@ -102,7 +108,7 @@ export default function OverviewTab({
 
         <ChartCard title="Drift Score over Time">
           {chartData.length === 0 ? (
-            <EmptyState />
+            <ChartStatePane state={metrics.chartStates.drift} onRetry={metrics.refresh} height={380} />
           ) : (
             <ResponsiveContainer width="100%" height={380}>
               <LineChart data={chartData} {...CHART_COMMON}>
@@ -122,16 +128,16 @@ export default function OverviewTab({
                   tickFormatter={(v) => `${(v * 100).toFixed(0)}%`}
                 />
                 <Tooltip content={<CustomTooltip formatter={(v) => `${(v * 100).toFixed(1)}%`} />} />
-                <ReferenceLine y={0.7} stroke="var(--accent-crimson-vibrant)" strokeDasharray="4 2" strokeWidth={1} />
-                <ReferenceLine y={0.5} stroke="var(--accent-amber-vibrant)" strokeDasharray="4 2" strokeWidth={1} />
+                <ReferenceLine y={driftCritical} stroke="var(--accent-crimson-vibrant)" strokeDasharray="4 2" strokeWidth={1} />
+                <ReferenceLine y={driftWarning} stroke="var(--accent-amber-vibrant)" strokeDasharray="4 2" strokeWidth={1} />
                 <Line type="monotone" dataKey="drift" stroke={LINE_COLORS.steel} dot={false} strokeWidth={1.5} name="Drift" />
               </LineChart>
             </ResponsiveContainer>
           )}
           <ChartLegend items={[
             { color: LINE_COLORS.steel, label: 'Drift' },
-            { color: 'var(--accent-amber-vibrant)', label: '50% warn' },
-            { color: 'var(--accent-crimson-vibrant)', label: '70% crit' },
+            { color: 'var(--accent-amber-vibrant)', label: `${(driftWarning * 100).toFixed(0)}% warn` },
+            { color: 'var(--accent-crimson-vibrant)', label: `${(driftCritical * 100).toFixed(0)}% crit` },
           ]} />
         </ChartCard>
       </div>
@@ -139,12 +145,6 @@ export default function OverviewTab({
     </div>
   )
 }
-
-const EmptyState = () => (
-  <div className="flex h-[380px] items-center justify-center">
-    <p className="typo-body-sm text-text-dimmed">Waiting for data…</p>
-  </div>
-)
 
 const ChartLegend = ({ items }) => (
   <div className="flex items-center gap-4 pt-1">

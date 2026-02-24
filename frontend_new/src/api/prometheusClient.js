@@ -5,10 +5,10 @@ class PrometheusClient {
     this.baseUrl = baseUrl;
   }
 
-  async query(query) {
+  async query(query, options = {}) {
     try {
       const url = `${this.baseUrl}/api/v1/query?query=${encodeURIComponent(query)}`;
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: options.signal });
 
       if (!response.ok) {
         throw new Error(`Prometheus query failed: ${response.statusText}`);
@@ -27,10 +27,10 @@ class PrometheusClient {
     }
   }
 
-  async queryRange(query, start, end, step = '5s') {
+  async queryRange(query, start, end, step = '5s', options = {}) {
     try {
       const url = `${this.baseUrl}/api/v1/query_range?query=${encodeURIComponent(query)}&start=${start}&end=${end}&step=${step}`;
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: options.signal });
 
       if (!response.ok) {
         throw new Error(`Prometheus range query failed: ${response.statusText}`);
@@ -98,9 +98,9 @@ class PrometheusClient {
     return parseFloat(series.value[1]);
   }
 
-  async health() {
+  async health(options = {}) {
     try {
-      const response = await fetch(`${this.baseUrl}/-/healthy`, { method: 'GET' });
+      const response = await fetch(`${this.baseUrl}/-/healthy`, { method: 'GET', signal: options.signal });
       return response.ok;
     } catch (error) {
       console.error('Prometheus health check failed:', error);

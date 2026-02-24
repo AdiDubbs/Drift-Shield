@@ -1,18 +1,61 @@
 import React, { useState } from 'react'
 import { motion } from 'framer-motion'
-import { Info } from 'lucide-react'
+import { Info, RefreshCw, AlertTriangle, CircleCheck, TriangleAlert, ShieldAlert } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { Card, CardHeader, CardTitle, CardContent } from './ui/card'
 import { Button } from './ui/button'
 import AnimatedNumber from './AnimatedNumber'
 
+const STATUS_META = {
+  nominal: {
+    label: 'Nominal',
+    textColor: 'var(--accent-mint-vibrant)',
+    bgColor: 'rgba(82,149,123,0.12)',
+    borderColor: 'rgba(82,149,123,0.35)',
+    Icon: CircleCheck,
+  },
+  warning: {
+    label: 'Warning',
+    textColor: 'var(--status-warning-fg)',
+    bgColor: 'var(--status-warning-bg)',
+    borderColor: 'var(--status-warning-border)',
+    Icon: TriangleAlert,
+  },
+  critical: {
+    label: 'Critical',
+    textColor: 'var(--status-critical-fg)',
+    bgColor: 'var(--status-critical-bg)',
+    borderColor: 'var(--status-critical-border)',
+    Icon: ShieldAlert,
+  },
+}
+
+const getDriftStatusMeta = (driftScore, warningThreshold, criticalThreshold) => {
+  if (driftScore >= criticalThreshold) return STATUS_META.critical
+  if (driftScore >= warningThreshold) return STATUS_META.warning
+  return STATUS_META.nominal
+}
+
+const StatusBadge = ({ status }) => {
+  if (!status) return null
+  const Icon = status.Icon
+  return (
+    <span
+      className="inline-flex items-center gap-1 typo-overline px-1.5 py-0.5 rounded-md border"
+      style={{ backgroundColor: status.bgColor, borderColor: status.borderColor, color: 'var(--text-primary)' }}
+    >
+      <Icon className="h-3 w-3" style={{ color: status.textColor }} />
+      {status.label}
+    </span>
+  )
+}
+
 const StatCard = ({ label, value, unit, sub, accentClass, tooltip, status, hero = false, delay = 0 }) => {
   const [showTip, setShowTip] = useState(false)
-  const heroColor = status === 'OPTIMAL' ? 'var(--accent-mint-vibrant)' : 'var(--accent-crimson-vibrant)'
-  const valueColor = hero
-    ? heroColor
-    : accentClass
+  const valueColor = accentClass
       ? undefined
+      : hero && status?.label === 'Nominal'
+        ? 'var(--accent-mint-vibrant)'
       : 'var(--text-primary)'
 
   return (
@@ -24,17 +67,7 @@ const StatCard = ({ label, value, unit, sub, accentClass, tooltip, status, hero 
     >
       <div className="flex items-center gap-1.5">
         <span className="typo-overline text-text-muted">{label}</span>
-        {hero && status && (
-          <span
-            className="typo-overline px-1.5 py-0.5 rounded-md"
-            style={{
-              backgroundColor: status === 'OPTIMAL' ? 'rgba(82,149,123,0.12)' : 'rgba(152,96,96,0.12)',
-              color: heroColor,
-            }}
-          >
-            {status === 'OPTIMAL' ? 'NOMINAL' : 'ALERT'}
-          </span>
-        )}
+        {hero && status ? <StatusBadge status={status} /> : null}
         {tooltip && (
           <div
             className="relative"
@@ -128,6 +161,49 @@ const TimeRangeToggle = ({ value, onChange }) => (
   </div>
 )
 
+const ChartStatePane = ({ state, onRetry, height = 260 }) => {
+  if (state?.loading) {
+    return (
+      <div className="flex items-center justify-center" style={{ height }}>
+        <div className="flex items-center gap-2 typo-body-sm text-text-muted">
+          <RefreshCw className="h-4 w-4 animate-spin" />
+          Fetching live telemetry…
+        </div>
+      </div>
+    )
+  }
+
+  if (state?.error) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 text-center" style={{ height }}>
+        <div className="space-y-1">
+          <p className="typo-body-sm text-text-primary">We couldn’t load this panel.</p>
+          <div className="flex items-center justify-center gap-2 typo-caption text-accent-amber">
+          <AlertTriangle className="h-4 w-4" />
+          {state.error}
+          </div>
+        </div>
+        <Button variant="secondary" size="sm" onClick={onRetry} className="gap-1.5">
+          <RefreshCw className="h-3.5 w-3.5" />
+          Retry
+        </Button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex items-center justify-center" style={{ height }}>
+      <div className="flex flex-col items-center gap-3">
+        <p className="typo-body-sm text-text-dimmed">No data available yet for this time range.</p>
+        <Button variant="secondary" size="sm" onClick={onRetry} className="gap-1.5">
+          <RefreshCw className="h-3.5 w-3.5" />
+          Retry
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 const CHART_COMMON = {
   margin: { top: 6, right: 10, left: -10, bottom: 0 },
 }
@@ -152,4 +228,7 @@ export {
   CHART_AXIS_TICK,
   CHART_GRID_STROKE,
   SectionTitle,
+  ChartStatePane,
+  getDriftStatusMeta,
+  StatusBadge,
 }

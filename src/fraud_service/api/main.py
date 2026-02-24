@@ -3,6 +3,7 @@ import math
 import os
 import random
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -11,36 +12,49 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from prometheus_client import make_asgi_app
 
-from fraud_service.api.schemas import PredictRequest, PredictResponse, DriftInfo
-from fraud_service.api.decisions import decide_action
 from fraud_service.api.constants import (
     ACTION_FALLBACK,
+    ACTION_MANUAL,
+    ACTION_CODES,
+    REASON_CODES,
     REASON_DATA_CONTRACT,
     FALLBACK_SCHEMA_MISMATCH,
 )
+from fraud_service.api.decisions import decide_action
+from fraud_service.api.schemas import (
+    ActionCode,
+    ApiReadiness,
+    DriftInfo,
+    PredictContract,
+    PredictRequest,
+    PredictResponse,
+    ReasonCode,
+)
+from fraud_service.drift.emitter import RetrainEmitter
+from fraud_service.drift.retrain import RetrainTrigger
 from fraud_service.modeling.predict import BundleManager, predict_one
 from fraud_service.monitoring.metrics import (
-    REQS,
     ACTIONS,
     DRIFT_SCORE,
-    P_FRAUD,
-    SHADOW_RUNS,
-    SHADOW_DISAGREE,
-    FEATURE_SOFT_COUNT,
     FEATURE_HARD_COUNT,
-    RETRAIN_TRIGGERS,
+    FEATURE_SOFT_COUNT,
+    P_FRAUD,
+    REQS,
     REQUEST_LATENCY,
+    RETRAIN_TRIGGERS,
+    SHADOW_DISAGREE,
+    SHADOW_RUNS,
 )
-from fraud_service.drift.retrain import RetrainTrigger
-from fraud_service.drift.emitter import RetrainEmitter
-from fraud_service.utils.config_validator import validate_config, validate_cors_origins, ConfigValidationError
+from fraud_service.utils.config_validator import ConfigValidationError, validate_config, validate_cors_origins
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Drift_Shield API")
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+PROMETHEUS_UPSTREAM = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
+CONTRACT_VERSION = "2026-02-23"
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
-
 if ENVIRONMENT == "production":
     cors_origins_str = os.getenv("CORS_ORIGINS", "")
     CORS_ORIGINS = [origin.strip() for origin in cors_origins_str.split(",") if origin.strip()]
@@ -53,12 +67,62 @@ else:
         "http://localhost:3001",
     ]
 
-try:
-    validate_cors_origins(CORS_ORIGINS, ENVIRONMENT)
-    logger.info(f"CORS configured for {ENVIRONMENT} with origins: {CORS_ORIGINS}")
-except ConfigValidationError as e:
-    logger.error(f"CORS configuration error: {e}")
-    raise
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.bootstrap_error = None
+    app.state.ready = False
+    app.state.manager = None
+    app.state.retrain_trigger = None
+    app.state.emitter = None
+    app.state.shadow_sampling_rate = 1.0
+    app.state.contract_version = CONTRACT_VERSION
+
+    try:
+        validate_cors_origins(CORS_ORIGINS, ENVIRONMENT)
+        logger.info("CORS configured for %s with origins: %s", ENVIRONMENT, CORS_ORIGINS)
+
+        manager = BundleManager(str(CONFIG_PATH))
+        cfg = manager.cfg
+        validate_config(cfg, str(CONFIG_PATH))
+
+        retrain_trigger = RetrainTrigger(
+            soft_thr=float(cfg["drift"]["soft_threshold"]),
+            hard_thr=float(cfg["drift"]["hard_threshold"]),
+            required_hard_windows=int(cfg["drift"].get("required_hard_windows", 3)),
+        )
+
+        repo_root = Path(cfg.get("paths", {}).get("repo_root", PROJECT_ROOT)).resolve()
+        requests_dir = cfg.get("paths", {}).get("retrain_requests_dir", "artifacts/retrain_requests")
+        requests_dir_path = Path(requests_dir)
+        if not requests_dir_path.is_absolute():
+            requests_dir_path = (repo_root / requests_dir_path).resolve()
+        requests_dir_path.mkdir(parents=True, exist_ok=True)
+
+        emitter = RetrainEmitter(
+            request_dir=str(requests_dir_path),
+            cooldown_seconds=float(cfg.get("retrain", {}).get("cooldown_seconds", 600)),
+            max_pending=int(cfg.get("retrain", {}).get("max_pending", 1)),
+        )
+
+        # Warm active bundle at startup so readiness is explicit.
+        active = manager.get_active()
+        logger.info("Loaded active bundle at startup: %s", active.model_version)
+
+        app.state.manager = manager
+        app.state.retrain_trigger = retrain_trigger
+        app.state.emitter = emitter
+        app.state.shadow_sampling_rate = float(cfg.get("shadow", {}).get("sampling_rate", 1.0))
+        app.state.ready = True
+    except Exception as e:
+        app.state.bootstrap_error = str(e)
+        app.state.ready = False
+        logger.error("Startup failed: %s", e, exc_info=True)
+
+    yield
+
+
+app = FastAPI(title="Drift_Shield API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,31 +133,6 @@ app.add_middleware(
 )
 
 app.mount("/metrics", make_asgi_app())
-
-try:
-    manager = BundleManager("config.yaml")
-    _cfg = manager.cfg
-    validate_config(_cfg, "config.yaml")
-except Exception as e:
-    logger.error(f"Startup failed: {e}")
-    raise
-
-retrain_trigger = RetrainTrigger(
-    soft_thr=float(_cfg["drift"]["soft_threshold"]),
-    hard_thr=float(_cfg["drift"]["hard_threshold"]),
-    required_hard_windows=int(_cfg["drift"].get("required_hard_windows", 3)),
-)
-
-_requests_dir = _cfg.get("paths", {}).get("retrain_requests_dir", "artifacts/retrain_requests")
-Path(_requests_dir).mkdir(parents=True, exist_ok=True)
-
-emitter = RetrainEmitter(
-    request_dir=str(_requests_dir),
-    cooldown_seconds=float(_cfg.get("retrain", {}).get("cooldown_seconds", 600)),
-    max_pending=int(_cfg.get("retrain", {}).get("max_pending", 1)),
-)
-
-SHADOW_SAMPLING_RATE = float(_cfg.get("shadow", {}).get("sampling_rate", 1.0))
 
 
 def _schema_check(bundle_features, payload, version, schema):
@@ -143,12 +182,65 @@ def _schema_check(bundle_features, payload, version, schema):
     return len(reasons) == 0, reasons
 
 
-PROMETHEUS_UPSTREAM = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
+def _require_runtime() -> tuple[BundleManager, RetrainTrigger, RetrainEmitter, float]:
+    manager = getattr(app.state, "manager", None)
+    trigger = getattr(app.state, "retrain_trigger", None)
+    emitter = getattr(app.state, "emitter", None)
+    sampling = float(getattr(app.state, "shadow_sampling_rate", 1.0))
+
+    if manager is None or trigger is None or emitter is None:
+        detail = getattr(app.state, "bootstrap_error", None) or "Service is still initializing"
+        raise HTTPException(status_code=503, detail=f"Model service unavailable: {detail}")
+
+    return manager, trigger, emitter, sampling
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "drift_shield"}
+    return {
+        "status": "alive",
+        "service": "drift_shield",
+        "ready": bool(getattr(app.state, "ready", False)),
+    }
+
+
+@app.get("/ready", response_model=ApiReadiness)
+def readiness() -> ApiReadiness:
+    try:
+        manager, _, _, _ = _require_runtime()
+        active = manager.get_active()
+        shadow = manager.get_shadow()
+        app.state.ready = True
+        return ApiReadiness(
+            ready=True,
+            detail="ready",
+            active_model_version=active.model_version,
+            shadow_model_version=shadow.model_version if shadow else None,
+        )
+    except HTTPException as e:
+        return ApiReadiness(ready=False, detail=str(e.detail))
+    except Exception as e:
+        app.state.ready = False
+        return ApiReadiness(ready=False, detail=str(e))
+
+
+@app.get("/contracts/predict", response_model=PredictContract)
+def predict_contract() -> PredictContract:
+    manager = getattr(app.state, "manager", None)
+    schema_version = 1
+    if manager is not None:
+        schema_version = int(manager.cfg.get("schema", {}).get("version", 1))
+
+    return PredictContract(
+        contract_version=str(getattr(app.state, "contract_version", CONTRACT_VERSION)),
+        schema_version=schema_version,
+        action_codes=[ActionCode(code) for code in ACTION_CODES],
+        reason_codes=[ReasonCode(code) for code in REASON_CODES],
+        notes=[
+            "reasons may include structured details such as MISSING_FEATURES:* or EXTRA_FEATURES:*",
+            "schema_version must match config.schema.version",
+        ],
+    )
 
 
 @app.api_route("/prometheus/{path:path}", methods=["GET"])
@@ -168,14 +260,13 @@ def predict(req: PredictRequest) -> PredictResponse:
     t0 = time.perf_counter()
     REQS.inc()
 
+    manager, retrain_trigger, emitter, shadow_sampling_rate = _require_runtime()
+
     try:
         bundle = manager.get_active()
     except Exception as e:
-        logger.error(f"Failed to load active model bundle: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=503,
-            detail=f"Model service unavailable: {str(e)}"
-        )
+        logger.error("Failed to load active model bundle: %s", e, exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Model service unavailable: {str(e)}")
 
     schema_cfg = bundle.cfg.get("schema", {})
     ok_schema, schema_reasons = _schema_check(
@@ -185,9 +276,9 @@ def predict(req: PredictRequest) -> PredictResponse:
         schema_cfg,
     )
     if not ok_schema:
-        action = ACTION_FALLBACK
+        action = ActionCode.ACTION_FALLBACK
         reasons = [REASON_DATA_CONTRACT] + schema_reasons
-        ACTIONS.labels(code=action).inc()
+        ACTIONS.labels(code=action.value).inc()
 
         drift_info = DriftInfo(
             drift_score=0.0,
@@ -218,7 +309,7 @@ def predict(req: PredictRequest) -> PredictResponse:
     try:
         out = predict_one(bundle, req.transaction_features)
     except Exception as e:
-        logger.error(f"Prediction failed: {e}", exc_info=True)
+        logger.error("Prediction failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
     drift_score = float(out.get("drift_score", 0.0))
@@ -227,13 +318,14 @@ def predict(req: PredictRequest) -> PredictResponse:
     soft_thr = float(bundle.cfg["drift"]["soft_threshold"])
     hard_thr = float(bundle.cfg["drift"]["hard_threshold"])
 
-    action, reasons = decide_action(
+    action_raw, reasons = decide_action(
         pred_set=out.get("prediction_set", []),
         drift_score=drift_score,
         soft_thr=soft_thr,
         hard_thr=hard_thr,
     )
-    ACTIONS.labels(code=action).inc()
+    action = ActionCode(action_raw)
+    ACTIONS.labels(code=action.value).inc()
 
     p_fraud = out.get("p_fraud")
     if p_fraud is not None:
@@ -246,7 +338,6 @@ def predict(req: PredictRequest) -> PredictResponse:
     if fhard is not None:
         FEATURE_HARD_COUNT.set(float(fhard))
 
-    # numpy scalars don't serialize — .item() coerces them to plain python
     def _unwrap(v):
         return v.item() if hasattr(v, "item") else v
 
@@ -280,35 +371,35 @@ def predict(req: PredictRequest) -> PredictResponse:
             reason=drift_dict["reason"],
             drift_score=float(drift_dict["drift_score"]),
             model_version=str(bundle.model_version),
-            action_code=str(action),
+            action_code=str(action.value),
             p_fraud=float(_unwrap(p_fraud)) if p_fraud is not None else None,
             drift=drift_dict,
         )
 
-
     try:
         shadow = manager.get_shadow()
-        if shadow is not None and random.random() < SHADOW_SAMPLING_RATE:
+        if shadow is not None and random.random() < shadow_sampling_rate:
             SHADOW_RUNS.inc()
             s_out = predict_one(shadow, req.transaction_features)
 
             s_drift = float(s_out.get("drift_score", 0.0))
-            s_action, _ = decide_action(
+            s_action_raw, _ = decide_action(
                 pred_set=s_out.get("prediction_set", []),
                 drift_score=s_drift,
                 soft_thr=float(shadow.cfg["drift"]["soft_threshold"]),
                 hard_thr=float(shadow.cfg["drift"]["hard_threshold"]),
             )
+            s_action = ActionCode(s_action_raw)
 
             disagree = (s_out.get("prediction_set") != out.get("prediction_set")) or (s_action != action)
             if disagree:
                 SHADOW_DISAGREE.inc()
     except Exception as e:
-        logger.warning(f"Shadow model prediction failed: {e}")
+        logger.warning("Shadow model prediction failed: %s", e)
 
     prediction = None
     pred_set = out.get("prediction_set", [])
-    if len(pred_set) == 1 and action in ("ACTION_PREDICT", "ACTION_MONITOR"):
+    if len(pred_set) == 1 and action in (ActionCode.ACTION_PREDICT, ActionCode.ACTION_MONITOR):
         prediction = pred_set[0]
 
     drift_info = DriftInfo(
@@ -337,14 +428,16 @@ def predict(req: PredictRequest) -> PredictResponse:
 
     REQUEST_LATENCY.observe(time.perf_counter() - t0)
     return resp
-    
-    
+
+
 @app.get("/dashboard/stats")
 def dashboard_stats():
+    manager, _, _, _ = _require_runtime()
+
     try:
         bundle = manager.get_active()
     except Exception as e:
-        logger.error(f"Failed to get active bundle for stats: {e}")
+        logger.error("Failed to get active bundle for stats: %s", e)
         raise HTTPException(status_code=500, detail="Failed to retrieve model information")
 
     def get_val(metric, prefer_total: bool = False):
@@ -372,14 +465,16 @@ def dashboard_stats():
         "shadow_runs": get_val(SHADOW_RUNS, prefer_total=True),
         "model_version": bundle.model_version,
         "action_counts": {
-            "predict": get_action_count("ACTION_PREDICT"),
-            "fallback": get_action_count("ACTION_FALLBACK"),
-        }
+            "predict": get_action_count(ActionCode.ACTION_PREDICT.value),
+            "fallback": get_action_count(ActionCode.ACTION_FALLBACK.value),
+        },
     }
 
 
 @app.post("/retrain")
 def trigger_retrain():
+    manager, _, emitter, _ = _require_runtime()
+
     try:
         bundle = manager.get_active()
     except Exception as e:
@@ -389,7 +484,7 @@ def trigger_retrain():
         reason="MANUAL_RETRAIN",
         drift_score=0.0,
         model_version=str(bundle.model_version),
-        action_code="ACTION_MANUAL",
+        action_code=ACTION_MANUAL,
         drift={"drift_score": 0.0, "reason": "MANUAL_RETRAIN", "top_drifted_features": []},
     )
     if not emitted:
@@ -399,16 +494,18 @@ def trigger_retrain():
 
 @app.get("/models/info")
 def models_info():
+    manager, _, _, _ = _require_runtime()
+
     try:
         active = manager.get_active()
     except Exception as e:
-        logger.error(f"Failed to get active model info: {e}")
+        logger.error("Failed to get active model info: %s", e)
         raise HTTPException(status_code=500, detail="Failed to retrieve active model information")
 
     try:
         shadow = manager.get_shadow()
     except Exception as e:
-        logger.warning(f"Failed to get shadow model info: {e}")
+        logger.warning("Failed to get shadow model info: %s", e)
         shadow = None
 
     return {
@@ -423,6 +520,5 @@ def models_info():
         "shadow": {
             "version": shadow.model_version if shadow else None,
             "enabled": shadow is not None,
-        } if shadow else None
+        } if shadow else None,
     }
-    

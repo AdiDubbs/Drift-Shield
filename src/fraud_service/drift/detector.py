@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
@@ -38,13 +39,21 @@ class DriftDetector:
 
     @classmethod
     def from_reference(cls, ref_json_path: str, cfg: dict) -> "DriftDetector":
+        ref_path = Path(ref_json_path).resolve()
         ref = load_json(ref_json_path)
 
         feature_names = list(ref["feature_names"])
         psi_bins = int(ref["psi_bins"])
-        ref_sample_path = ref["ref_sample_path"]
+        ref_sample_path = Path(ref["ref_sample_path"])
+        if not ref_sample_path.is_absolute():
+            candidate = (ref_path.parent / ref_sample_path).resolve()
+            if candidate.exists():
+                ref_sample_path = candidate
+            else:
+                repo_root = Path(cfg.get("paths", {}).get("repo_root", "."))
+                ref_sample_path = (repo_root / ref_sample_path).resolve()
 
-        ks_ref = np.load(ref_sample_path).astype(np.float32)
+        ks_ref = np.load(str(ref_sample_path)).astype(np.float32)
 
         psi_edges = []
         psi_expected = []

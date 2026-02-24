@@ -71,13 +71,22 @@ def _prepare_retrain_data(w: WatcherCfg) -> tuple[str, str]:
     original_train = w.repo_root / "data/processed/train.csv"
     original_calib = w.repo_root / "data/processed/calib.csv"
     drifted_path = w.repo_root / "data/processed/test_drifted.csv"
+    fallback_test_path = w.repo_root / "data/processed/test.csv"
 
     df_orig = pd.concat([
         pd.read_csv(original_train),
         pd.read_csv(original_calib),
     ], ignore_index=True)
 
-    df_drifted = pd.read_csv(drifted_path)
+    if drifted_path.exists():
+        df_drifted = pd.read_csv(drifted_path)
+    elif fallback_test_path.exists():
+        print(f"[watcher] warning: {drifted_path} missing; falling back to {fallback_test_path}")
+        df_drifted = pd.read_csv(fallback_test_path)
+    else:
+        raise FileNotFoundError(
+            f"Missing retrain source files: expected {drifted_path} or {fallback_test_path}"
+        )
 
     if list(df_orig.columns) != list(df_drifted.columns):
         raise ValueError("Column mismatch between original and drifted data")
@@ -181,7 +190,7 @@ def _eval_candidate(w: WatcherCfg, candidate_version: str, active_version: str) 
 def _promotion_gate(w: WatcherCfg, report: Dict[str, Any]) -> tuple[bool, str]:
     # Cooldown check
     stamp_path = w.reports_dir / "last_promotion.json"
-    cooldown_s = int(w.retrain.get("cooldown_seconds", 300))
+    cooldown_s = int(w.promote.get("cooldown_seconds", 300))
     if stamp_path.exists():
         try:
             last_ts = float(load_json(str(stamp_path)).get("ts", 0))

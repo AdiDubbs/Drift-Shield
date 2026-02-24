@@ -1,6 +1,7 @@
-import React, { useState, useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { ExternalLink, RefreshCw, AlertTriangle, Copy, Check } from 'lucide-react'
 import { Button } from './ui/button'
+import { useToast } from './ToastProvider'
 
 const GRAFANA_BASE_URL = import.meta.env.VITE_GRAFANA_URL || 'http://localhost:3000'
 const GRAFANA_DASHBOARD_URL =
@@ -8,31 +9,117 @@ const GRAFANA_DASHBOARD_URL =
   || `${GRAFANA_BASE_URL}/d/afe3285cd4xkwc/drift-shield?orgId=1&from=now-15m&to=now&timezone=browser&refresh=5s`
 
 export default function GrafanaPanel() {
+  const { pushToast } = useToast()
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [errorReason, setErrorReason] = useState('')
+  const [externalOnly, setExternalOnly] = useState(false)
   const iframeRef = useRef(null)
+  const loadTimerRef = useRef(null)
+
+  const clearLoadTimer = () => {
+    if (loadTimerRef.current) {
+      window.clearTimeout(loadTimerRef.current)
+      loadTimerRef.current = null
+    }
+  }
+
+  const startLoadTimeout = () => {
+    clearLoadTimer()
+    loadTimerRef.current = window.setTimeout(() => {
+      if (!loaded) {
+        setError(true)
+        setErrorReason('The iframe did not finish loading. Embedding may be blocked by Grafana security headers.')
+        pushToast({
+          tone: 'warning',
+          title: 'Grafana embed timeout',
+          description: 'Embedding may be blocked. Use Open in new tab if this persists.',
+        })
+      }
+    }, 12000)
+  }
+
+  useEffect(() => {
+    startLoadTimeout()
+    return clearLoadTimer
+  }, [])
 
   const retry = () => {
     setError(false)
     setLoaded(false)
+    setExternalOnly(false)
+    setErrorReason('')
+    startLoadTimeout()
     // Re-mount iframe by forcing a src reset
     if (iframeRef.current) iframeRef.current.src = GRAFANA_DASHBOARD_URL
   }
 
+  const fallbackCopy = (text) => {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.setAttribute('readonly', '')
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    let success = false
+    try {
+      success = document.execCommand('copy')
+    } catch {
+      success = false
+    } finally {
+      document.body.removeChild(ta)
+    }
+    return success
+  }
+
   const handleCopyUrl = () => {
-    navigator.clipboard.writeText(GRAFANA_DASHBOARD_URL).then(() => {
+    const onCopied = () => {
       setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    })
+      window.setTimeout(() => setCopied(false), 2000)
+      pushToast({ tone: 'success', title: 'URL copied', description: 'Grafana link copied to clipboard.' })
+    }
+
+    if (!navigator.clipboard?.writeText) {
+      if (fallbackCopy(GRAFANA_DASHBOARD_URL)) {
+        onCopied()
+      } else {
+        pushToast({ tone: 'error', title: 'Copy blocked', description: 'Clipboard permission was denied. Use Open in new tab.' })
+      }
+      return
+    }
+
+    navigator.clipboard.writeText(GRAFANA_DASHBOARD_URL)
+      .then(onCopied)
+      .catch(() => {
+        if (fallbackCopy(GRAFANA_DASHBOARD_URL)) {
+          onCopied()
+          return
+        }
+        pushToast({ tone: 'error', title: 'Copy blocked', description: 'Clipboard permission was denied. Use Open in new tab.' })
+      })
   }
 
   // onLoad fires even for login redirects — detect if the iframe landed on
   // a page that looks like a Grafana auth wall by checking the title after load.
   // We can't read cross-origin content, so we just mark as loaded and let the
   // error state handle genuine network failures.
-  const handleLoad = () => setLoaded(true)
-  const handleError = () => { setLoaded(true); setError(true) }
+  const handleLoad = () => {
+    clearLoadTimer()
+    setLoaded(true)
+  }
+  const handleError = () => {
+    clearLoadTimer()
+    setLoaded(true)
+    setError(true)
+    setErrorReason('The browser blocked iframe embedding or Grafana is unreachable.')
+    pushToast({
+      tone: 'warning',
+      title: 'Grafana embed blocked',
+      description: 'The browser blocked embedding. Try opening Grafana in a new tab.',
+    })
+  }
 
   return (
     <div className="flex flex-col space-y-6" style={{ height: 'calc(100vh - 112px)' }}>
@@ -63,14 +150,17 @@ export default function GrafanaPanel() {
       </div>
 
       <div className="card card-glass flex-1 min-h-0 overflow-hidden">
-        {error ? (
+        {error || externalOnly ? (
           <div className="flex h-full flex-col items-center justify-center gap-4 text-center p-8">
             <AlertTriangle className="h-10 w-10 opacity-60" style={{ color: 'var(--accent-amber-vibrant)' }} />
             <div className="space-y-1">
-              <p className="typo-body text-text-primary">Unable to load Grafana</p>
+              <p className="typo-body text-text-primary">{externalOnly ? 'External view mode enabled' : 'Unable to load Grafana'}</p>
               <p className="typo-body-sm text-text-muted">
                 Grafana may not be running at <span className="font-mono">{GRAFANA_DASHBOARD_URL}</span>.
               </p>
+              {errorReason ? (
+                <p className="typo-body-sm text-text-muted max-w-md">{errorReason}</p>
+              ) : null}
               <p className="typo-body-sm text-text-dimmed mt-2 max-w-sm">
                 If Grafana has <span className="font-mono">X-Frame-Options: DENY</span> or <span className="font-mono">SAMEORIGIN</span> set,
                 the browser will block embedding regardless — use "Open in new tab" instead.
@@ -81,6 +171,11 @@ export default function GrafanaPanel() {
                 <RefreshCw className="h-3.5 w-3.5" />
                 Retry
               </Button>
+              {!externalOnly ? (
+                <Button onClick={() => setExternalOnly(true)} variant="ghost" size="sm">
+                  Continue without embed
+                </Button>
+              ) : null}
               <Button variant="default" size="sm" asChild>
                 <a href={GRAFANA_DASHBOARD_URL} target="_blank" rel="noopener noreferrer" className="gap-1.5">
                   <ExternalLink className="h-3.5 w-3.5" />
@@ -106,6 +201,7 @@ export default function GrafanaPanel() {
               onLoad={handleLoad}
               onError={handleError}
               title="Grafana Dashboard"
+              referrerPolicy="no-referrer"
             />
           </div>
         )}

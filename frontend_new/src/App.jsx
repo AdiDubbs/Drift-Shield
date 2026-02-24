@@ -22,6 +22,8 @@ import TestPanel from './components/TestPanel'
 import AboutTab from './components/AboutTab'
 import GrafanaPanel from './components/GrafanaPanel'
 import { Button } from './components/ui/button'
+import { useToast } from './components/ToastProvider'
+import { getDriftStatusMeta, StatusBadge } from './components/shared'
 
 const STALE_THRESHOLD_SECONDS = 12
 const THEME_KEY = 'drift-shield-theme'
@@ -66,6 +68,25 @@ function SidebarRow({ label, value, valueClassName }) {
 }
 
 function Header({ activeTab, onTabChange, connected, theme, onToggleTheme }) {
+  const handleTabKeyDown = (event, currentKey) => {
+    const keys = NAV_TABS.map((tab) => tab.key)
+    const index = keys.indexOf(currentKey)
+    if (index < 0) return
+
+    let nextKey = null
+    if (event.key === 'ArrowRight') nextKey = keys[(index + 1) % keys.length]
+    if (event.key === 'ArrowLeft') nextKey = keys[(index - 1 + keys.length) % keys.length]
+    if (event.key === 'Home') nextKey = keys[0]
+    if (event.key === 'End') nextKey = keys[keys.length - 1]
+    if (!nextKey) return
+
+    event.preventDefault()
+    onTabChange(nextKey)
+    const tablist = event.currentTarget.closest('[role="tablist"]')
+    const nextTab = tablist?.querySelector(`[data-tab-key="${nextKey}"]`)
+    nextTab?.focus()
+  }
+
   return (
     <header
       className="sticky top-0 z-40 border-b bg-[var(--surface-frost-strong)]/90 backdrop-blur-xl"
@@ -81,11 +102,18 @@ function Header({ activeTab, onTabChange, connected, theme, onToggleTheme }) {
           </h1>
         </div>
 
-        <nav className="hidden lg:flex items-center gap-0 h-full ml-2">
+        <nav className="hidden lg:flex items-center gap-0 h-full ml-2" role="tablist" aria-label="Primary navigation tabs">
           {NAV_TABS.map((tab) => (
             <button
               key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.key}
+              aria-controls="main-tabpanel"
+              tabIndex={activeTab === tab.key ? 0 : -1}
+              data-tab-key={tab.key}
               onClick={() => onTabChange(tab.key)}
+              onKeyDown={(event) => handleTabKeyDown(event, tab.key)}
               className={cn(
                 'relative px-4 h-full typo-body font-medium transition-colors duration-150',
                 activeTab === tab.key
@@ -108,18 +136,35 @@ function Header({ activeTab, onTabChange, connected, theme, onToggleTheme }) {
               {connected ? 'Connected' : 'Disconnected'}
             </span>
           </div>
-          <Button variant="icon" size="icon" onClick={onToggleTheme}>
+          <Button
+            variant="icon"
+            size="icon"
+            onClick={onToggleTheme}
+            aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          >
             {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </Button>
         </div>
       </div>
 
-      <div className="block lg:hidden border-t overflow-x-auto scrollbar-thin" style={{ borderColor: 'var(--border-shell)' }}>
+      <div
+        className="block lg:hidden border-t overflow-x-auto scrollbar-thin"
+        style={{ borderColor: 'var(--border-shell)' }}
+        role="tablist"
+        aria-label="Primary navigation tabs"
+      >
         <div className="flex items-center">
           {NAV_TABS.map((tab) => (
             <button
               key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.key}
+              aria-controls="main-tabpanel"
+              tabIndex={activeTab === tab.key ? 0 : -1}
+              data-tab-key={tab.key}
               onClick={() => onTabChange(tab.key)}
+              onKeyDown={(event) => handleTabKeyDown(event, tab.key)}
               className={cn(
                 'relative shrink-0 px-4 py-2.5 typo-body font-medium transition-colors duration-150',
                 activeTab === tab.key
@@ -140,6 +185,10 @@ function SidebarIconRail({ issuesCount, connected, prometheusConnected, hasModel
   const statusTone = connected && prometheusConnected
     ? 'text-[var(--accent-mint-vibrant)]'
     : 'text-[var(--accent-amber-vibrant)]'
+  const systemStatusLabel = connected && prometheusConnected
+    ? 'System status healthy'
+    : 'System status needs attention'
+  const modelStatusLabel = hasModel ? 'Model bundle loaded' : 'Model bundle pending'
 
   return (
     <div className="flex h-full min-w-[64px] flex-col items-center gap-2.5 px-2 py-3">
@@ -147,30 +196,35 @@ function SidebarIconRail({ issuesCount, connected, prometheusConnected, hasModel
         variant="icon"
         size="icon"
         onClick={onToggleSidebar}
-        title="Expand sidebar"
-        className="h-9 w-9 rounded-xl"
+        aria-label="Expand sidebar"
+        className="rounded-xl"
       >
         <PanelLeftOpen className="h-4 w-4" />
       </Button>
 
-      <button className={cn('relative h-9 w-9 rounded-xl border border-border-dim panel-subtle flex items-center justify-center', statusTone)} title="System status">
+      <div
+        className={cn('relative h-11 w-11 rounded-xl border border-border-dim panel-subtle flex items-center justify-center', statusTone)}
+        role="img"
+        aria-label={systemStatusLabel}
+      >
         <Activity className="h-4 w-4" />
         {issuesCount > 0 && (
           <span className="absolute -right-1 -top-1 h-4 min-w-4 px-1 rounded-full bg-[var(--accent-crimson-vibrant)] typo-caption leading-4 text-white text-center">
             {issuesCount}
           </span>
         )}
-      </button>
+      </div>
 
-      <button
+      <div
         className={cn(
-          'h-9 w-9 rounded-xl border border-border-dim panel-subtle flex items-center justify-center',
+          'h-11 w-11 rounded-xl border border-border-dim panel-subtle flex items-center justify-center',
           hasModel ? 'text-[var(--accent-steel-vibrant)]' : 'text-text-dimmed'
         )}
-        title={hasModel ? 'Model bundle loaded' : 'Model bundle pending'}
+        role="img"
+        aria-label={modelStatusLabel}
       >
         <Cpu className="h-4 w-4" />
-      </button>
+      </div>
 
       <div className="h-px w-6 bg-[var(--border-dim)] mt-0.5" />
 
@@ -180,8 +234,8 @@ function SidebarIconRail({ issuesCount, connected, prometheusConnected, hasModel
           size="icon"
           onClick={onRetrain}
           disabled={isRetraining}
-          title="Trigger retrain"
-          className="h-9 w-9 rounded-xl"
+          aria-label={isRetraining ? 'Retrain in progress' : 'Trigger retrain'}
+          className="rounded-xl"
         >
           {isRetraining ? <RefreshCw className="h-4 w-4 animate-spin" /> : <GitCommit className="h-4 w-4" />}
         </Button>
@@ -218,6 +272,7 @@ function Sidebar({
       : driftScore >= soft
         ? 'var(--accent-amber-vibrant)'
         : 'var(--accent-steel-vibrant)'
+  const driftStatus = getDriftStatusMeta(driftScore ?? 0, soft, hard)
 
   const telemetryState =
     staleSeconds == null
@@ -238,8 +293,8 @@ function Sidebar({
             variant="icon"
             size="icon"
             onClick={onToggleSidebar}
-            title="Collapse sidebar"
-            className="h-8 w-8 rounded-lg"
+            aria-label="Collapse sidebar"
+            className="rounded-lg"
           >
             <PanelLeftClose className="h-4 w-4" />
           </Button>
@@ -279,8 +334,12 @@ function Sidebar({
           <span className="typo-overline text-text-secondary">Model & Risk</span>
         </div>
 
-        <SidebarRow label="Model" value={stats?.model_version ?? modelInfo?.active?.model_id ?? '—'} valueClassName="font-mono" />
+        <SidebarRow label="Model" value={stats?.model_version ?? modelInfo?.active?.version ?? '—'} valueClassName="font-mono" />
         <SidebarRow label="Drift score" value={`${((driftScore ?? 0) * 100).toFixed(1)}%`} valueClassName="font-mono" />
+        <div className="flex items-center justify-between">
+          <span className="typo-body-sm text-text-muted">Drift state</span>
+          <StatusBadge status={driftStatus} />
+        </div>
         <div className="h-1.5 rounded-full bg-[var(--surface)]">
           <div
             className="h-full rounded-full transition-all duration-500"
@@ -292,6 +351,9 @@ function Sidebar({
         </div>
         <SidebarRow label="Coverage" value={coverageGuarantee != null ? `${(coverageGuarantee * 100).toFixed(1)}%` : '—'} valueClassName="text-[var(--accent-mint-vibrant)] font-mono" />
         <SidebarRow label="Soft / Hard" value={`${(soft * 100).toFixed(0)}% / ${(hard * 100).toFixed(0)}%`} valueClassName="font-mono" />
+        <p className="typo-caption text-text-dimmed">
+          Crossing the hard threshold increases retrain pressure and can shift actions to fallback/monitor.
+        </p>
       </div>
 
       <div className="card card-glass p-4 space-y-3">
@@ -315,6 +377,7 @@ function Sidebar({
 }
 
 export default function App() {
+  const { pushToast } = useToast()
   const [activeTab, setActiveTab] = useState(getTabFromURL)
   const [theme, setTheme] = useState(() => getStoredTheme())
   const [stats, setStats] = useState(null)
@@ -330,6 +393,7 @@ export default function App() {
   const prevRequestsRef = useRef(null)
   const prevTimeRef = useRef(null)
   const rpsWindowRef = useRef([])
+  const pollControllerRef = useRef(null)
 
   useEffect(() => {
     const html = document.documentElement
@@ -354,10 +418,15 @@ export default function App() {
 
   useEffect(() => {
     const poll = async () => {
+      if (pollControllerRef.current) {
+        pollControllerRef.current.abort()
+      }
+      const controller = new AbortController()
+      pollControllerRef.current = controller
       try {
         const [dashboardStats, info] = await Promise.all([
-          apiClient.getDashboardStats(),
-          apiClient.getModelInfo().catch(() => null),
+          apiClient.getDashboardStats({ signal: controller.signal }),
+          apiClient.getModelInfo({ signal: controller.signal }).catch(() => null),
         ])
 
         setStats(dashboardStats)
@@ -387,14 +456,22 @@ export default function App() {
         prevTimeRef.current = now
         setConnected(true)
         setLastUpdate(now)
-      } catch {
+      } catch (error) {
+        if (error?.name === 'AbortError' || controller.signal.aborted) {
+          return
+        }
         setConnected(false)
       }
     }
 
     poll()
     const interval = setInterval(poll, 5000)
-    return () => clearInterval(interval)
+    return () => {
+      clearInterval(interval)
+      if (pollControllerRef.current) {
+        pollControllerRef.current.abort()
+      }
+    }
   }, [])
 
   const metrics = usePrometheusMetrics({ timeRange, enabled: true })
@@ -418,8 +495,17 @@ export default function App() {
     setIsRetraining(true)
     try {
       await apiClient.triggerRetrain()
+      pushToast({
+        tone: 'success',
+        title: 'Retrain queued',
+        description: 'Manual retrain request was accepted by the API.',
+      })
     } catch (error) {
-      console.error('Retrain error:', error)
+      pushToast({
+        tone: 'error',
+        title: 'Retrain failed',
+        description: error?.message || 'Unable to queue retrain request.',
+      })
     } finally {
       setIsRetraining(false)
     }
@@ -436,6 +522,8 @@ export default function App() {
           rps={rps}
           timeRange={timeRange}
           setTimeRange={setTimeRange}
+          driftWarning={soft}
+          driftCritical={hard}
         />
       </ErrorBoundary>
     ),
@@ -452,7 +540,13 @@ export default function App() {
     ),
     LOGS: (
       <ErrorBoundary>
-        <LogsTab stats={stats} driftScore={driftScore} modelInfo={modelInfo} />
+        <LogsTab
+          stats={stats}
+          driftScore={driftScore}
+          modelInfo={modelInfo}
+          driftWarning={soft}
+          driftCritical={hard}
+        />
       </ErrorBoundary>
     ),
     GRAFANA: (
@@ -476,6 +570,7 @@ export default function App() {
       </ErrorBoundary>
     ),
   }
+  const activeTabLabel = NAV_TABS.find((tab) => tab.key === activeTab)?.label ?? 'Overview'
 
   return (
     <div className={cn('flex min-h-screen flex-col bg-background text-foreground', theme)}>
@@ -501,7 +596,7 @@ export default function App() {
               issuesCount={issuesCount}
               connected={connected}
               prometheusConnected={metrics.prometheusConnected}
-              hasModel={Boolean(stats?.model_version ?? modelInfo?.active?.model_id)}
+              hasModel={Boolean(stats?.model_version ?? modelInfo?.active?.version)}
               onRetrain={handleRetrain}
               isRetraining={isRetraining}
               onToggleSidebar={() => setSidebarCollapsed(false)}
@@ -533,6 +628,9 @@ export default function App() {
             <AnimatePresence mode="wait">
               <motion.div
                 key={activeTab}
+                id="main-tabpanel"
+                role="tabpanel"
+                aria-label={`${activeTabLabel} panel`}
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -8 }}

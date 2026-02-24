@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -13,6 +15,8 @@ import xgboost as xgb
 from fraud_service.utils.io import load_yaml
 from fraud_service.uncertainty.conformal import load_calib, prediction_set
 from fraud_service.drift.detector import DriftDetector
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -26,16 +30,44 @@ class ModelBundle:
     model_version: str
 
 
-def _read_pointer(path: Path, key: str) -> Optional[str]:
-    if not path.exists():
-        return None
-    data = json.loads(path.read_text())
-    value = data.get(key)
-    return str(value) if value else None
+def _read_pointer(path: Path, key: str, retries: int = 3) -> Optional[str]:
+    for attempt in range(retries):
+        if not path.exists():
+            return None
+
+        try:
+            raw = path.read_text()
+        except OSError:
+            if attempt < retries - 1:
+                time.sleep(0.02)
+                continue
+            return None
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            if attempt < retries - 1:
+                time.sleep(0.02)
+                continue
+            return None
+
+        value = data.get(key)
+        if value is None:
+            return None
+
+        cleaned = str(value).strip()
+        return cleaned if cleaned else None
+
+    return None
 
 
 def _resolve_version_dir(cfg: dict, version: str) -> Path:
-    return Path(cfg["paths"]["versions_dir"]) / version
+    paths = cfg.get("paths", {})
+    versions_dir = Path(paths["versions_dir"])
+    if not versions_dir.is_absolute():
+        repo_root = Path(paths.get("repo_root", "."))
+        versions_dir = repo_root / versions_dir
+    return versions_dir / version
 
 
 def _load_xgb(model_path: Path) -> xgb.Booster:
@@ -89,7 +121,8 @@ def _load_versioned_bundle(cfg: dict, version: str) -> ModelBundle:
 
 class BundleManager:
     def __init__(self, config_path: str = "config.yaml"):
-        self.cfg = load_yaml(config_path)
+        self._config_path = Path(config_path).expanduser().resolve()
+        self.cfg = load_yaml(str(self._config_path))
         self._lock = threading.Lock()
 
         self._active_version: Optional[str] = None
@@ -98,7 +131,13 @@ class BundleManager:
         self._active_bundle: Optional[ModelBundle] = None
         self._shadow_bundle: Optional[ModelBundle] = None
 
-        self._repo_root = Path(self.cfg.get("paths", {}).get("repo_root", ".")).resolve()
+        repo_root_cfg = Path(self.cfg.get("paths", {}).get("repo_root", "."))
+        if repo_root_cfg.is_absolute():
+            self._repo_root = repo_root_cfg
+        else:
+            self._repo_root = (self._config_path.parent / repo_root_cfg).resolve()
+        self.cfg.setdefault("paths", {})
+        self.cfg["paths"]["repo_root"] = str(self._repo_root)
         self._active_ptr = self._repo_root / self.cfg["paths"]["active_ptr"]
         self._shadow_ptr = self._repo_root / self.cfg["paths"]["shadow_ptr"]
 
@@ -106,12 +145,31 @@ class BundleManager:
         with self._lock:
             version = _read_pointer(self._active_ptr, "active_version")
             if not version:
+                if self._active_bundle is not None:
+                    logger.warning(
+                        "ACTIVE pointer missing/invalid at %s; keeping last loaded version %s",
+                        self._active_ptr,
+                        self._active_version,
+                    )
+                    return self._active_bundle
                 raise RuntimeError(f"ACTIVE pointer missing or invalid: {self._active_ptr}")
 
             if self._active_bundle and self._active_version == version:
                 return self._active_bundle
 
-            bundle = _load_versioned_bundle(self.cfg, version)
+            try:
+                bundle = _load_versioned_bundle(self.cfg, version)
+            except Exception as e:
+                if self._active_bundle is not None:
+                    logger.warning(
+                        "Failed to swap ACTIVE model to %s (%s). Keeping previous version %s",
+                        version,
+                        e,
+                        self._active_version,
+                    )
+                    return self._active_bundle
+                raise
+
             self._active_bundle = bundle
             self._active_version = version
             return bundle
@@ -120,12 +178,31 @@ class BundleManager:
         with self._lock:
             version = _read_pointer(self._shadow_ptr, "shadow_version")
             if not version:
-                return None
+                if self._shadow_bundle is not None:
+                    logger.warning(
+                        "SHADOW pointer missing/invalid at %s; keeping last loaded shadow version %s",
+                        self._shadow_ptr,
+                        self._shadow_version,
+                    )
+                return self._shadow_bundle
 
             if self._shadow_bundle and self._shadow_version == version:
                 return self._shadow_bundle
 
-            bundle = _load_versioned_bundle(self.cfg, version)
+            try:
+                bundle = _load_versioned_bundle(self.cfg, version)
+            except Exception as e:
+                if self._shadow_bundle is not None:
+                    logger.warning(
+                        "Failed to swap SHADOW model to %s (%s). Keeping previous version %s",
+                        version,
+                        e,
+                        self._shadow_version,
+                    )
+                    return self._shadow_bundle
+                logger.warning("Failed to load SHADOW model %s (%s). Shadow disabled.", version, e)
+                return None
+
             self._shadow_bundle = bundle
             self._shadow_version = version
             return bundle

@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Send, RotateCcw, AlertTriangle, CheckCircle, ChevronRight, Clock } from 'lucide-react'
+import { Send, RotateCcw, AlertTriangle, CheckCircle, ChevronRight, Clock, ChevronDown, ChevronUp } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { apiClient } from '../api/client'
 import { Button } from './ui/button'
@@ -10,16 +10,6 @@ const FIELD_GROUPS = [
     label: 'Transaction',
     fields: [
       { key: 'TransactionAmt', label: 'Amount ($)', type: 'number' },
-      { key: 'ProductCD', label: 'Product Code', type: 'select', options: ['W', 'H', 'C', 'S', 'R'] },
-      { key: 'card4', label: 'Card Network', type: 'select', options: ['visa', 'mastercard', 'discover', 'american express'] },
-      { key: 'card6', label: 'Card Type', type: 'select', options: ['debit', 'credit', 'charge card'] },
-    ],
-  },
-  {
-    label: 'Identity',
-    fields: [
-      { key: 'P_emaildomain', label: 'Purchaser Email', type: 'text' },
-      { key: 'R_emaildomain', label: 'Recipient Email', type: 'text' },
       { key: 'dist1', label: 'Distance', type: 'number' },
     ],
   },
@@ -43,11 +33,6 @@ const MODEL_BASE_FEATURES = {
 
 const DEFAULT_TX = {
   TransactionAmt: 100.5,
-  ProductCD: 'W',
-  card4: 'visa',
-  card6: 'debit',
-  P_emaildomain: 'gmail.com',
-  R_emaildomain: 'gmail.com',
   dist1: 0,
   M1: 'T', M2: 'T', M3: 'T',
 }
@@ -60,34 +45,48 @@ const PRESETS = [
   },
   {
     label: 'High Value',
-    tx: { ...DEFAULT_TX, TransactionAmt: 4999.99, card6: 'credit', dist1: 180 },
+    tx: { ...DEFAULT_TX, TransactionAmt: 4999.99 },
   },
   {
-    label: 'Email Mismatch',
-    tx: { ...DEFAULT_TX, P_emaildomain: 'protonmail.com', R_emaildomain: 'yahoo.com', M1: 'F', M2: 'F' },
+    label: 'Distance Spike',
+    tx: { ...DEFAULT_TX, dist1: 320 },
   },
   {
-    label: 'Suspicious',
-    tx: { ...DEFAULT_TX, TransactionAmt: 1499, dist1: 320, M3: 'F', card4: 'discover' },
+    label: 'Flag Mismatch',
+    tx: { ...DEFAULT_TX, M1: 'F', M2: 'F', M3: 'F' },
   },
 ]
 
+const NUMERIC_FIELDS = new Set(['TransactionAmt', 'dist1'])
+const ADVANCED_OVERRIDE_FIELDS = [
+  { key: 'Amount', label: 'Amount override', hint: 'Overrides mapped Amount feature.' },
+  { key: 'V4', label: 'V4 override', hint: 'Distance proxy feature.' },
+  { key: 'V10', label: 'V10 override', hint: 'M1 flag-derived feature.' },
+  { key: 'V14', label: 'V14 override', hint: 'M2 flag-derived feature.' },
+  { key: 'V17', label: 'V17 override', hint: 'M3 flag-derived feature.' },
+]
 
 export default function TestPanel() {
   const [features, setFeatures] = useState(DEFAULT_TX)
+  const [overridesOpen, setOverridesOpen] = useState(false)
+  const [overrides, setOverrides] = useState({})
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [history, setHistory] = useState([])
 
   const handleChange = (key, value) => {
-    setFeatures((prev) => ({ ...prev, [key]: isNaN(Number(value)) || value === '' ? value : Number(value) }))
+    if (NUMERIC_FIELDS.has(key)) {
+      setFeatures((prev) => ({ ...prev, [key]: value === '' ? '' : Number(value) }))
+      return
+    }
+    setFeatures((prev) => ({ ...prev, [key]: value }))
   }
 
   const toModelPayload = (tx) => {
     const amount = Number(tx.TransactionAmt)
     const dist = Number(tx.dist1)
-    return {
+    const mapped = {
       ...MODEL_BASE_FEATURES,
       Amount: Number.isFinite(amount) ? amount : MODEL_BASE_FEATURES.Amount,
       V4: Number.isFinite(dist) ? dist / 100 : 0,
@@ -95,6 +94,14 @@ export default function TestPanel() {
       V14: tx.M2 === 'F' ? -1.0 : 0.0,
       V17: tx.M3 === 'F' ? 1.0 : 0.0,
     }
+    const merged = { ...mapped }
+    Object.entries(overrides).forEach(([key, raw]) => {
+      const parsed = Number(raw)
+      if (raw !== '' && Number.isFinite(parsed)) {
+        merged[key] = parsed
+      }
+    })
+    return merged
   }
 
   const handleSubmit = async () => {
@@ -116,9 +123,19 @@ export default function TestPanel() {
     }
   }
 
-  const resetFeatures = () => { setFeatures(DEFAULT_TX); setResult(null); setError(null) }
+  const resetFeatures = () => {
+    setFeatures(DEFAULT_TX)
+    setOverrides({})
+    setOverridesOpen(false)
+    setResult(null)
+    setError(null)
+  }
 
-  const isFraud = result?.prediction === 1 || result?.prediction === 'fraud'
+  const action = result?.action_code ?? ''
+  const hasDefinitivePrediction = typeof result?.prediction === 'string' && result.prediction.length > 0
+  const isFallbackOrAbstain = action === 'ACTION_FALLBACK' || action === 'ACTION_ABSTAIN' || !hasDefinitivePrediction
+  const isFraud = result?.prediction === 1 || String(result?.prediction ?? '').toLowerCase() === 'fraud'
+  const hasFraudProbability = typeof result?.p_fraud === 'number' && Number.isFinite(result.p_fraud)
   const pFraud = result?.p_fraud ?? 0
 
   return (
@@ -126,6 +143,9 @@ export default function TestPanel() {
       <div>
         <h1 className="typo-title text-text-primary">Transaction Testing</h1>
         <p className="typo-subtitle text-text-dimmed mt-1">Submit a transaction to get a live fraud prediction</p>
+        <p className="typo-caption text-text-dimmed mt-2">
+          Start with basic inputs. Expand advanced controls only when you need precise feature overrides.
+        </p>
       </div>
 
       <div className={cn('grid gap-8', result || error ? 'grid-cols-[1fr_400px]' : 'grid-cols-1')}>
@@ -144,8 +164,9 @@ export default function TestPanel() {
               {PRESETS.map((p) => (
                 <button
                   key={p.label}
+                  type="button"
                   onClick={() => { setFeatures(p.tx); setResult(null); setError(null) }}
-                  className="rounded-full border border-border-dim bg-[var(--surface-frost-weak)] px-2.5 py-1 typo-body-sm text-text-secondary hover:text-text-primary hover:border-border-medium transition-colors"
+                  className="rounded-full border border-border-dim bg-[var(--surface-frost-weak)] min-h-11 px-3.5 typo-body-sm text-text-secondary hover:text-text-primary hover:border-border-medium transition-colors"
                 >
                   {p.label}
                 </button>
@@ -160,9 +181,10 @@ export default function TestPanel() {
                 <div className="grid grid-cols-3 gap-x-4 gap-y-4">
                   {group.fields.map(({ key, label, type, options }) => (
                     <div key={key} className="space-y-1.5">
-                      <label className="typo-overline text-text-muted">{label}</label>
+                      <label htmlFor={`tx-field-${key}`} className="typo-overline text-text-muted">{label}</label>
                       {type === 'select' ? (
                         <select
+                          id={`tx-field-${key}`}
                           value={features[key]}
                           onChange={(e) => handleChange(key, e.target.value)}
                           className="w-full rounded-md border border-border-dim bg-background px-2.5 py-1.5 typo-body text-text-primary outline-none focus:border-[var(--border-focus)] focus:ring-1 focus:ring-[var(--border-focus)] transition-colors"
@@ -171,6 +193,7 @@ export default function TestPanel() {
                         </select>
                       ) : (
                         <input
+                          id={`tx-field-${key}`}
                           type={type}
                           value={features[key]}
                           onChange={(e) => handleChange(key, e.target.value)}
@@ -182,6 +205,45 @@ export default function TestPanel() {
                 </div>
               </div>
             ))}
+
+            <div className="rounded-xl border border-border-dim bg-[var(--surface-frost-weak)] p-3">
+              <button
+                type="button"
+                onClick={() => setOverridesOpen((v) => !v)}
+                className="w-full min-h-11 flex items-center justify-between gap-2"
+                aria-expanded={overridesOpen}
+                aria-controls="advanced-overrides-panel"
+              >
+                <span className="typo-overline text-text-secondary">Advanced model feature overrides</span>
+                {overridesOpen ? <ChevronUp className="h-4 w-4 text-text-muted" /> : <ChevronDown className="h-4 w-4 text-text-muted" />}
+              </button>
+              <p className="typo-caption text-text-dimmed mt-1">
+                Overrides can force edge-case simulations and may increase drift/retrain pressure.
+              </p>
+              {overridesOpen ? (
+                <div id="advanced-overrides-panel" className="mt-3 space-y-3">
+                  {ADVANCED_OVERRIDE_FIELDS.map((field) => (
+                    <div key={field.key} className="space-y-1">
+                      <label htmlFor={`override-field-${field.key}`} className="typo-overline text-text-muted">{field.label}</label>
+                      <input
+                        id={`override-field-${field.key}`}
+                        type="number"
+                        value={overrides[field.key] ?? ''}
+                        onChange={(e) => setOverrides((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                        className="w-full rounded-md border border-border-dim bg-background px-2.5 py-1.5 typo-body text-text-primary placeholder-[var(--text-muted)] outline-none focus:border-[var(--border-focus)] focus:ring-1 focus:ring-[var(--border-focus)] transition-colors"
+                        placeholder="Leave blank to use mapped value"
+                      />
+                      <p className="typo-caption text-text-dimmed">{field.hint}</p>
+                    </div>
+                  ))}
+                  <div className="flex justify-end">
+                    <Button variant="secondary" size="sm" onClick={() => setOverrides({})}>
+                      Clear overrides
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
           </div>
 
           <Button onClick={handleSubmit} disabled={loading} className="w-full">
@@ -207,6 +269,11 @@ export default function TestPanel() {
                 Prediction failed
               </div>
               <p className="typo-body-sm opacity-80">{error}</p>
+              <div className="mt-3">
+                <Button variant="secondary" size="sm" onClick={handleSubmit} disabled={loading}>
+                  Retry prediction
+                </Button>
+              </div>
             </div>
           )}
 
@@ -214,14 +281,27 @@ export default function TestPanel() {
             <>
               <div className={cn(
                 'card card-glass p-6 text-center space-y-2',
-                isFraud ? 'border-crimson bg-crimson-subtle' : 'border-mint bg-mint-subtle'
+                isFallbackOrAbstain
+                  ? 'border-amber bg-amber-subtle'
+                  : isFraud
+                    ? 'border-crimson bg-crimson-subtle'
+                    : 'border-mint bg-mint-subtle'
               )}>
-                {isFraud
-                  ? <AlertTriangle className="h-7 w-7 text-accent-crimson mx-auto" />
-                  : <CheckCircle className="h-7 w-7 text-accent-mint mx-auto" />
+                {isFallbackOrAbstain
+                  ? <AlertTriangle className="h-7 w-7 text-accent-amber mx-auto" />
+                  : isFraud
+                    ? <AlertTriangle className="h-7 w-7 text-accent-crimson mx-auto" />
+                    : <CheckCircle className="h-7 w-7 text-accent-mint mx-auto" />
                 }
-                <p className={cn('typo-title', isFraud ? 'text-accent-crimson' : 'text-accent-mint')}>
-                  {isFraud ? 'Fraud Detected' : 'Legitimate'}
+                <p className={cn(
+                  'typo-title',
+                  isFallbackOrAbstain
+                    ? 'text-accent-amber'
+                    : isFraud
+                      ? 'text-accent-crimson'
+                      : 'text-accent-mint'
+                )}>
+                  {isFallbackOrAbstain ? 'No Definitive Prediction' : isFraud ? 'Fraud Detected' : 'Legitimate'}
                 </p>
                 <p className="typo-body-sm text-text-muted">{result.action_code ?? 'PASS'}</p>
 
@@ -231,7 +311,7 @@ export default function TestPanel() {
                     <span className="typo-overline font-semibold" style={{
                       color: pFraud >= 0.7 ? 'var(--accent-crimson-vibrant)' : pFraud >= 0.4 ? 'var(--accent-amber-vibrant)' : 'var(--accent-mint-vibrant)'
                     }}>
-                      {(pFraud * 100).toFixed(2)}%
+                      {hasFraudProbability ? `${(pFraud * 100).toFixed(2)}%` : 'N/A'}
                     </span>
                   </div>
                   <div className="h-2 w-full rounded-full bg-[var(--surface)]">
@@ -302,7 +382,8 @@ export default function TestPanel() {
                 </p>
               </div>
               {history.map((h, i) => {
-                const hFraud = h.result?.prediction === 1 || h.result?.prediction === 'fraud'
+                const hFraud = h.result?.prediction === 1 || String(h.result?.prediction ?? '').toLowerCase() === 'fraud'
+                const hHasP = typeof h.result?.p_fraud === 'number' && Number.isFinite(h.result.p_fraud)
                 const hP = h.result?.p_fraud ?? 0
                 return (
                   <div key={i} className="flex items-center justify-between px-4 py-2">
@@ -316,7 +397,7 @@ export default function TestPanel() {
                       <span className="typo-mono-sm" style={{
                         color: hFraud ? 'var(--accent-crimson-vibrant)' : 'var(--accent-mint-vibrant)'
                       }}>
-                        {(hP * 100).toFixed(1)}%
+                        {hHasP ? `${(hP * 100).toFixed(1)}%` : 'N/A'}
                       </span>
                       <span className="typo-mono-sm text-text-dimmed">
                         {h.ts.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}

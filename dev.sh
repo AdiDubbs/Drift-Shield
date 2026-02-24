@@ -71,6 +71,10 @@ sleep 3
 echo -e "${BLUE}[Prometheus]${NC} Starting on http://localhost:9090"
 prometheus --config.file=monitoring/prometheus/prometheus.yml &
 
+# Start retrain watcher
+echo -e "${BLUE}[Watcher]${NC} Starting retrain watcher"
+PYTHONPATH=src "${PYTHON_CMD}" scripts/watcher.py &
+
 # Start frontend
 echo -e "${GREEN}[Frontend]${NC} Starting UI on http://localhost:5173"
 (
@@ -105,6 +109,7 @@ echo "Drift Shield is running"
 echo "  Backend:    http://localhost:8000"
 echo "  Frontend:   http://localhost:5173"
 echo "  Prometheus: http://localhost:9090"
+echo "  Watcher:    enabled (scripts/watcher.py)"
 echo "  Health:     http://localhost:8000/health"
 echo ""
 echo "Press Ctrl+C to stop all services"
