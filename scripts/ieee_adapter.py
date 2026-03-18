@@ -90,6 +90,7 @@ def replay(n: int, url: str) -> None:
 
     df = pd.read_csv(OUT_PATH)
     X = df.drop(columns=["Class"])
+    y = df["Class"].astype(int)
     n = min(n, len(X))
 
     print(f"Replaying {n:,} IEEE-CIS transactions → {url}/predict")
@@ -97,10 +98,15 @@ def replay(n: int, url: str) -> None:
 
     for i in range(n):
         row = X.iloc[i].to_dict()
+        actual_label = int(y.iloc[i])
         try:
             r = requests.post(
                 f"{url}/predict",
-                json={"schema_version": 1, "transaction_features": row},
+                json={
+                    "schema_version": 1,
+                    "transaction_features": row,
+                    "actual_label": actual_label,
+                },
                 timeout=5,
             )
             r.raise_for_status()

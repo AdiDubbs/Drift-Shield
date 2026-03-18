@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -77,7 +78,7 @@ def ensure_initial_model() -> None:
         return
 
     print("[bootstrap] No active model found; running scripts/setup.py")
-    _run(["python", "scripts/setup.py"])
+    _run([sys.executable, "scripts/setup.py"])
 
 
 def main() -> None:

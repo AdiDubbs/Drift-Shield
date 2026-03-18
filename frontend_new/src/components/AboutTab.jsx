@@ -6,8 +6,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "./ui/tooltip";
+import { formatModelVersion } from "./shared";
 
 export default function AboutTab({ stats, modelInfo, driftScore }) {
+  const schemaForDisplay = modelInfo?.schema_version ?? stats?.schema_version ?? null;
   const activeVersion =
     stats?.model_version ?? modelInfo?.active?.version ?? "N/A";
   const shadowVersion = modelInfo?.shadow?.version ?? null;
@@ -41,7 +43,7 @@ export default function AboutTab({ stats, modelInfo, driftScore }) {
       name: "Serving",
       icon: Server,
       purpose: "API surface and request handling",
-      helpText: "Handles inbound requests, schema validation, and response contracts.",
+      helpText: "Receives transaction data, checks it has the right shape for the active model, and returns fraud predictions.",
       stack: ["FastAPI", "Uvicorn", "Pydantic"],
       details: "Endpoints: /predict, /dashboard/stats",
     },
@@ -49,9 +51,9 @@ export default function AboutTab({ stats, modelInfo, driftScore }) {
       name: "Modeling",
       icon: Cpu,
       purpose: "Inference and uncertainty controls",
-      helpText: "Runs predictions with uncertainty calibration and decision policy logic.",
+      helpText: "XGBoost classifies each transaction as fraud or legitimate. Conformal Prediction then adds a statistical guarantee about how reliable that decision is.",
       stack: ["XGBoost", "Conformal Prediction", "Policy Rules"],
-      details: `Coverage ${coverageValue} (alpha ${alphaValue}), soft/hard drift ${(
+      details: `Coverage ${coverageValue} (alpha ${alphaValue}), warning/critical drift ${(
         soft * 100
       ).toFixed(0)}% / ${(hard * 100).toFixed(0)}%`,
     },
@@ -59,7 +61,7 @@ export default function AboutTab({ stats, modelInfo, driftScore }) {
       name: "Observability",
       icon: LineChart,
       purpose: "Monitoring and diagnostics",
-      helpText: "Tracks runtime health, drift, latency, and disagreement metrics.",
+      helpText: "Watches the system in real time — prediction speed, how much incoming data has drifted from the training baseline, and whether the active and shadow models are giving different answers.",
       stack: ["Prometheus", "Grafana", "Event Timeline"],
       details: "Signals: drift, latency, shadow disagreement",
     },
@@ -67,10 +69,10 @@ export default function AboutTab({ stats, modelInfo, driftScore }) {
       name: "Governance",
       icon: GitBranch,
       purpose: "Model lifecycle and release safety",
-      helpText: "Controls active/shadow promotion, retrain triggers, and rollback safety.",
+      helpText: "Manages the full model lifecycle — triggering retraining when drift gets too high, comparing candidate models against the live one, and only promoting a new model when it's proven to be better.",
       stack: ["Active/Shadow Routing", "Retrain Queue", "Rollback Pointer"],
-      details: `Active ${activeVersion} | Shadow ${
-        shadowEnabled ? shadowVersion : "Disabled"
+      details: `Active ${formatModelVersion(activeVersion, { schemaVersion: schemaForDisplay, fallback: "N/A" })} | Shadow ${
+        shadowEnabled ? formatModelVersion(shadowVersion, { schemaVersion: schemaForDisplay, fallback: "Disabled" }) : "Disabled"
       }`,
     },
   ];
@@ -86,36 +88,36 @@ export default function AboutTab({ stats, modelInfo, driftScore }) {
         </div>
 
         <div className="card card-glass grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 xl:divide-x divide-[var(--border-dim)]">
-          <ModelKpi
-            label="Active Model"
-            value={activeVersion}
-            note="Currently serving production traffic"
-            helpText="Version currently handling live traffic."
-            mono
-          />
-          <ModelKpi
-            label="Shadow Model"
-            value={shadowEnabled ? shadowVersion : "Disabled"}
+            <ModelKpi
+              label="Active Model"
+              value={formatModelVersion(activeVersion, { schemaVersion: schemaForDisplay, fallback: "N/A" })}
+              note="Currently serving production traffic"
+              helpText="The model currently making fraud decisions for all incoming transactions. Its performance is what the drift score is measuring against."
+              mono
+            />
+            <ModelKpi
+              label="Shadow Model"
+              value={shadowEnabled ? formatModelVersion(shadowVersion, { schemaVersion: schemaForDisplay }) : "Disabled"}
             note={
               shadowEnabled
                 ? "Evaluated alongside active model"
                 : "No shadow version loaded"
             }
-            helpText="Candidate model scored in parallel for safe comparison."
+            helpText="A candidate model that runs alongside the active model but whose predictions don't affect users — used to safely evaluate whether a retrained model is ready to take over."
             mono
           />
           <ModelKpi
             label="Coverage Target"
             value={coverageValue}
-            note={`Conformal alpha: ${alphaValue}`}
-            helpText="Desired prediction-set coverage from conformal calibration."
+            note={`Error budget (α): ${alphaValue}`}
+            helpText="How often the model is statistically guaranteed to be correct. A 95% target means at most 1 in 20 predictions can be wrong — this bound is enforced by conformal calibration at training time. Alpha is the allowed error rate (e.g. α=5% → 95% coverage)."
             accent="text-accent-mint"
           />
           <ModelKpi
             label="Current Drift"
             value={driftPercent}
             note="Live drift score"
-            helpText="Current feature-distribution shift versus the reference baseline."
+            helpText="How much live transaction patterns have diverged from the data the model was trained on. High drift means the model may be seeing patterns it wasn't prepared for."
             accent="text-accent-steel"
           />
         </div>

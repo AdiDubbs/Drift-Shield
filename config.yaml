@@ -14,6 +14,7 @@ split:
 
 model:
   kind: "xgboost"
+  version_width: 4
   params:
     max_depth: 5
     n_estimators: 400
@@ -60,14 +61,22 @@ paths:
 
   rollback_ptr: "artifacts/models/ROLLBACK_MODEL.json"
   manifest_path: "artifacts/models/manifest.json"
+  version_counter_path: "artifacts/models/version_counter.json"
 
   retrain_requests_dir: "artifacts/retrain_requests"
+  recent_predict_features_path: "artifacts/retrain_requests/recent_predict_features.jsonl"
   reports_dir: "artifacts/reports"
 
 retrain:
   cooldown_seconds: 600
   max_pending: 1
   old_data_ratio: 0.7
+  recent_requests_max: 5000
+  recent_requests_compact_every: 100
+  recent_requests_for_retrain: 2000
+  recent_requests_for_reference: 5000
+  pseudo_label_low: 0.05
+  pseudo_label_high: 0.95
 
 
 promote:
@@ -75,8 +84,10 @@ promote:
   poll_seconds: 1.0
   cooldown_seconds: 120
 
-  min_auc_delta: -0.002
-  min_f1_delta: -0.002
+  min_auc_delta: 0.0
+  min_f1_delta: 0.0
+  min_auc: null
+  min_f1: null
   max_cost_increase: 0.05
   require_cost_metric: false
 

@@ -1,6 +1,7 @@
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from scipy.stats import ks_2samp
@@ -30,12 +31,17 @@ class DriftDetector:
     psi_soft_thr: float = 0.10
     psi_hard_thr: float = 0.25
 
-    _buf: List[np.ndarray] = None
+    _buf: Optional[List[np.ndarray]] = None
     _since_last: int = 0
     _last_score: float = 0.0
-    _last_top: List[str] = None
+    _last_top: Optional[List[str]] = None
     _last_soft_count: int = 0
     _last_hard_count: int = 0
+    _has_scored: bool = False
+    _lock: threading.Lock = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._lock = threading.Lock()
 
     @classmethod
     def from_reference(cls, ref_json_path: str, cfg: dict) -> "DriftDetector":
@@ -83,86 +89,120 @@ class DriftDetector:
             _last_score=0.0,
             _last_soft_count=0,
             _last_hard_count=0,
+            _has_scored=False,
         )
 
     def update_and_score(self, x_row: np.ndarray) -> Dict[str, Any]:
-        if self._buf is None:
-            self._buf = []
-        if self._last_top is None:
-            self._last_top = []
+        with self._lock:
+            if self._buf is None:
+                self._buf = []
+            if self._last_top is None:
+                self._last_top = []
 
-        self._buf.append(x_row.reshape(-1).astype(np.float32))
-        self._since_last += 1
+            self._buf.append(x_row.reshape(-1).astype(np.float32))
+            self._since_last += 1
 
-        if len(self._buf) > self.window_size:
-            self._buf = self._buf[-self.window_size:]
+            if len(self._buf) > self.window_size:
+                self._buf = self._buf[-self.window_size:]
 
-        if len(self._buf) < max(100, self.stride):
+            min_samples = max(100, self.stride)
+            samples_collected = len(self._buf)
+            samples_until_ready = max(0, min_samples - samples_collected)
+
+            if samples_collected < min_samples:
+                return {
+                    "drift_score": 0.0,
+                    "top_drifted_features": [],
+                    "psi_mean": 0.0,
+                    "ks_flag_frac": 0.0,
+                    "feature_soft_count": 0,
+                    "feature_hard_count": 0,
+                    "ready": False,
+                    "samples_collected": samples_collected,
+                    "samples_until_ready": samples_until_ready,
+                    "updated": False,
+                }
+
+            if self._since_last < self.stride:
+                return {
+                    "drift_score": self._last_score,
+                    "top_drifted_features": self._last_top,
+                    "psi_mean": None,
+                    "ks_flag_frac": None,
+                    "feature_soft_count": self._last_soft_count,
+                    "feature_hard_count": self._last_hard_count,
+                    "ready": bool(self._has_scored),
+                    "samples_collected": samples_collected,
+                    "samples_until_ready": 0,
+                    "updated": False,
+                }
+
+            self._since_last = 0
+            X_live = np.vstack(self._buf)
+            num_features = X_live.shape[1]
+
+            psi_vals = np.zeros(num_features, dtype=np.float32)
+            ks_pvals = np.ones(num_features, dtype=np.float32)
+
+            for i, feature_name in enumerate(self.feature_names):
+                live_col = X_live[:, i]
+                edges = self.psi_edges[i]
+                expected = self.psi_expected[i]
+
+                actual_counts, _ = np.histogram(live_col, bins=edges)
+                actual = (actual_counts / max(1, actual_counts.sum())).astype(np.float32)
+
+                psi_vals[i] = _psi(expected, actual)
+
+                ref_col = self.ks_ref[:, i]
+                try:
+                    ks_pvals[i] = ks_2samp(ref_col, live_col, alternative="two-sided", mode="auto").pvalue
+                except Exception:
+                    ks_pvals[i] = 1.0
+
+            psi_score = np.clip(np.mean(np.minimum(psi_vals / PSI_NORMALIZATION_FACTOR, 1.0)), 0.0, 1.0)
+            ks_flag_frac = np.clip(np.mean((ks_pvals < self.p_value_threshold).astype(np.float32)), 0.0, 1.0)
+            drift_score = np.clip(PSI_WEIGHT * psi_score + KS_WEIGHT * ks_flag_frac, 0.0, 1.0)
+
+            ks_score = -np.log(np.clip(ks_pvals, 1e-300, 1.0))
+            combined_rank = PSI_WEIGHT * psi_vals + KS_WEIGHT * ks_score
+            top_idx = np.argsort(combined_rank)[::-1][:5]
+            top_feats = [self.feature_names[i] for i in top_idx]
+
+            soft_count = (psi_vals > self.psi_soft_thr).sum()
+            hard_count = (psi_vals > self.psi_hard_thr).sum()
+
+            self._last_score = drift_score
+            self._last_top = top_feats
+            self._last_soft_count = soft_count
+            self._last_hard_count = hard_count
+            self._has_scored = True
+
             return {
-                "drift_score": 0.0,
-                "top_drifted_features": [],
-                "psi_mean": 0.0,
-                "ks_flag_frac": 0.0,
-                "feature_soft_count": 0,
-                "feature_hard_count": 0,
-                "updated": False,
+                "drift_score": float(drift_score),
+                "top_drifted_features": top_feats,
+                "psi_mean": float(psi_vals.mean()),
+                "ks_flag_frac": float(ks_flag_frac),
+                "feature_soft_count": int(soft_count),
+                "feature_hard_count": int(hard_count),
+                "ready": True,
+                "samples_collected": samples_collected,
+                "samples_until_ready": 0,
+                "updated": True,
             }
 
-        if self._since_last < self.stride:
+    def status_snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            min_samples = max(100, self.stride)
+            samples_collected = len(self._buf or [])
             return {
-                "drift_score": self._last_score,
-                "top_drifted_features": self._last_top,
-                "psi_mean": None,
-                "ks_flag_frac": None,
-                "feature_soft_count": self._last_soft_count,
-                "feature_hard_count": self._last_hard_count,
-                "updated": False,
+                "ready": bool(self._has_scored),
+                "window_size": int(self.window_size),
+                "stride": int(self.stride),
+                "samples_collected": int(samples_collected),
+                "samples_until_ready": int(max(0, min_samples - samples_collected)),
+                "last_score": float(self._last_score),
+                "last_top_drifted_features": list(self._last_top or []),
+                "last_feature_soft_count": int(self._last_soft_count),
+                "last_feature_hard_count": int(self._last_hard_count),
             }
-
-        self._since_last = 0
-        X_live = np.vstack(self._buf)
-        num_features = X_live.shape[1]
-
-        psi_vals = np.zeros(num_features, dtype=np.float32)
-        ks_pvals = np.ones(num_features, dtype=np.float32)
-
-        for i, feature_name in enumerate(self.feature_names):
-            live_col = X_live[:, i]
-            edges = self.psi_edges[i]
-            expected = self.psi_expected[i]
-
-            actual_counts, _ = np.histogram(live_col, bins=edges)
-            actual = (actual_counts / max(1, actual_counts.sum())).astype(np.float32)
-
-            psi_vals[i] = _psi(expected, actual)
-
-            ref_col = self.ks_ref[:, i]
-            try:
-                ks_pvals[i] = ks_2samp(ref_col, live_col, alternative="two-sided", mode="auto").pvalue
-            except Exception:
-                ks_pvals[i] = 1.0
-
-        psi_score = np.clip(np.mean(np.minimum(psi_vals / PSI_NORMALIZATION_FACTOR, 1.0)), 0.0, 1.0)
-        ks_flag_frac = np.clip(np.mean((ks_pvals < self.p_value_threshold).astype(np.float32)), 0.0, 1.0)
-        drift_score = np.clip(PSI_WEIGHT * psi_score + KS_WEIGHT * ks_flag_frac, 0.0, 1.0)
-
-        top_idx = np.argsort(psi_vals)[::-1][:5]
-        top_feats = [self.feature_names[i] for i in top_idx]
-
-        soft_count = (psi_vals > self.psi_soft_thr).sum()
-        hard_count = (psi_vals > self.psi_hard_thr).sum()
-
-        self._last_score = drift_score
-        self._last_top = top_feats
-        self._last_soft_count = soft_count
-        self._last_hard_count = hard_count
-
-        return {
-            "drift_score": float(drift_score),
-            "top_drifted_features": top_feats,
-            "psi_mean": float(psi_vals.mean()),
-            "ks_flag_frac": float(ks_flag_frac),
-            "feature_soft_count": int(soft_count),
-            "feature_hard_count": int(hard_count),
-            "updated": True,
-        }

@@ -1,9 +1,6 @@
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
+import threading
+from dataclasses import dataclass, field
 from typing import Any, Dict
-
-from fraud_service.utils.io import save_json
 
 
 @dataclass
@@ -18,22 +15,30 @@ class RetrainTrigger:
     required_hard_windows: int = 3
 
     _hard_hits: int = 0
+    _lock: threading.Lock = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._lock = threading.Lock()
 
     def on_drift_update(self, drift_score: float, extra: Dict[str, Any]) -> Dict[str, Any]:
-        triggered = False
-        reason = None
+        with self._lock:
+            # Only count windows when the detector has produced a fresh stride update.
+            if not bool(extra.get("updated", False)):
+                return {"triggered": False, "reason": None}
 
-        if drift_score >= self.hard_thr:
-            self._hard_hits += 1
-        else:
-            self._hard_hits = 0
+            triggered = False
+            reason = None
 
-        if self._hard_hits >= self.required_hard_windows:
-            triggered = True
-            reason = f"HARD_DRIFT_{self._hard_hits}_WINDOWS"
+            if drift_score >= self.hard_thr:
+                self._hard_hits += 1
+            else:
+                self._hard_hits = 0
 
+            if self._hard_hits >= self.required_hard_windows:
+                triggered = True
+                reason = f"HARD_DRIFT_{self._hard_hits}_WINDOWS"
 
-            # reset so we don't spam
-            self._hard_hits = 0
+                # reset so we don't spam
+                self._hard_hits = 0
 
-        return {"triggered": triggered, "reason": reason}
+            return {"triggered": triggered, "reason": reason}

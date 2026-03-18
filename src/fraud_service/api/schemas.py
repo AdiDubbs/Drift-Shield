@@ -40,6 +40,8 @@ class PredictRequest(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     # Feature payload
     transaction_features: Dict[str, Any]
+    # Optional ground-truth label for online active/shadow accuracy telemetry (0/1 or fraud/non_fraud)
+    actual_label: Optional[Union[int, bool, str]] = None
 
     model_config = {
         "json_schema_extra": {
@@ -57,6 +59,8 @@ class DriftInfo(BaseModel):
     drift_score: float
     soft_drift: bool
     hard_drift: bool
+    ready: bool = False
+    warmup_samples_remaining: Optional[int] = None
     top_drifted_features: List[str]
     psi_mean: Optional[float] = None
     ks_flag_frac: Optional[float] = None
@@ -119,6 +123,7 @@ class ApiReadiness(BaseModel):
 class PredictContract(BaseModel):
     contract_version: str
     schema_version: int
+    supported_schema_versions: Optional[List[int]] = None
     action_codes: List[ActionCode]
     reason_codes: List[ReasonCode]
     notes: List[str]

@@ -11,11 +11,13 @@ services:
       - ./artifacts:/app/artifacts
       - ./data:/app/data
       - ./config.yaml:/app/config.yaml:ro
+      - ./config_ieee.yaml:/app/config_ieee.yaml:ro
     environment:
       - PYTHONPATH=/app/src
       - PROMETHEUS_URL=http://prometheus:9090
+      - SECONDARY_CONFIG_PATHS=config_ieee.yaml
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      test: ["CMD", "python", "-c", "import json,sys,urllib.request; d=json.loads(urllib.request.urlopen('http://localhost:8000/ready').read()); sys.exit(0 if d.get('ready') else 1)"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -26,13 +28,31 @@ services:
       context: .
       target: api
     container_name: driftshield_watcher
-    command: ["python", "scripts/watcher.py"]
+    command: ["python", "scripts/watcher.py", "--config", "config.yaml"]
     volumes:
       - ./artifacts:/app/artifacts
       - ./data:/app/data
       - ./config.yaml:/app/config.yaml:ro
     environment:
       - PYTHONPATH=/app/src
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  watcher_ieee:
+    build:
+      context: .
+      target: api
+    container_name: driftshield_watcher_ieee
+    command: ["python", "scripts/watcher.py", "--config", "config_ieee.yaml"]
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./data:/app/data
+      - ./config_ieee.yaml:/app/config_ieee.yaml:ro
+    environment:
+      - PYTHONPATH=/app/src
+      - WATCHER_CONFIG_PATH=config_ieee.yaml
     depends_on:
       api:
         condition: service_healthy
@@ -57,6 +77,30 @@ services:
       - PYTHONPATH=/app/src
       - IEEE_SAMPLE=20000
       - IEEE_TRAFFIC_SLEEP=0.2
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ieee_native_traffic:
+    build:
+      context: .
+      target: api
+    container_name: driftshield_ieee_native_traffic
+    command:
+      [
+        "sh",
+        "-c",
+        "if [ ! -f data/ieee_processed/test.csv ]; then python scripts/setup.py --config config_ieee.yaml; fi && python scripts/traffic_loop.py --url http://api:8000 --schema-version 2 --csv data/ieee_processed/test.csv --sleep ${IEEE_NATIVE_TRAFFIC_SLEEP:-0.2}",
+      ]
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./ieee-fraud-detection:/app/ieee-fraud-detection:ro
+      - ./config_ieee.yaml:/app/config_ieee.yaml:ro
+    environment:
+      - PYTHONPATH=/app/src
+      - IEEE_NATIVE_TRAFFIC_SLEEP=0.2
     depends_on:
       api:
         condition: service_healthy

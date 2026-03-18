@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { AlertCircle, AlertTriangle, CheckCircle2, Info, Settings, Trash2, Copy, Check } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { Button } from './ui/button'
-import { getDriftStatusMeta, StatusBadge } from './shared'
+import { formatModelVersion, getDriftStatusMeta, StatusBadge } from './shared'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
 
 const SESSION_START = new Date().toISOString()
@@ -29,6 +29,7 @@ export default function LogsTab({
   driftWarning = 0.5,
   driftCritical = 0.7,
 }) {
+  const schemaForModelDisplay = modelInfo?.schema_version ?? stats?.schema_version ?? null
   const [entries, setEntries] = useState(SYSTEM_ENTRIES)
   const [filter, setFilter] = useState('all')
   const [copied, setCopied] = useState(false)
@@ -52,7 +53,7 @@ export default function LogsTab({
       addEntry({
         type: 'info',
         message: 'Model version updated',
-        note: `Active version: ${modelInfo.active.version}`,
+        note: `Active version: ${formatModelVersion(modelInfo.active.version, { schemaVersion: schemaForModelDisplay })}`,
         ts: new Date().toISOString(),
       })
       prevRef.current.modelId = modelInfo.active.version

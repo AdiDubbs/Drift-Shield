@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any, Dict, Optional
 
 from fraud_service.utils.io import load_json, save_json
@@ -64,6 +65,80 @@ def load_manifest(manifest_path: str) -> Dict[str, Any]:
 def save_manifest(manifest_path: str, manifest: Dict[str, Any]) -> None:
     ensure_parent(manifest_path)
     save_json(manifest, manifest_path)
+
+
+def _next_model_number_from_manifest(manifest: Dict[str, Any]) -> int:
+    versions = manifest.get("versions", {})
+    if not isinstance(versions, dict):
+        return 1
+
+    max_seen = 0
+    for key in versions.keys():
+        if not isinstance(key, str):
+            continue
+        match = re.fullmatch(r"v_model_(\d+)", key.strip())
+        if not match:
+            continue
+        try:
+            max_seen = max(max_seen, int(match.group(1)))
+        except ValueError:
+            continue
+
+    return max_seen + 1
+
+
+def _next_model_number_from_versions_dir(versions_dir: Optional[str]) -> int:
+    if not versions_dir:
+        return 1
+
+    vdir = Path(versions_dir)
+    if not vdir.exists() or not vdir.is_dir():
+        return 1
+
+    max_seen = 0
+    for child in vdir.iterdir():
+        if not child.is_dir():
+            continue
+        match = re.fullmatch(r"v_model_(\d+)", child.name.strip())
+        if not match:
+            continue
+        try:
+            max_seen = max(max_seen, int(match.group(1)))
+        except ValueError:
+            continue
+    return max_seen + 1
+
+
+def generate_sequential_model_version(
+    manifest_path: str,
+    counter_path: str,
+    versions_dir: Optional[str] = None,
+    width: int = 4,
+) -> str:
+    """
+    Generate next model version using v_model_NNNN format.
+    Counter is persisted for monotonic IDs and bootstrapped from manifest.
+    """
+    manifest = load_manifest(manifest_path)
+    derived_next = _next_model_number_from_manifest(manifest)
+    derived_next = max(derived_next, _next_model_number_from_versions_dir(versions_dir))
+
+    counter_file = Path(counter_path)
+    current_next = derived_next
+    if counter_file.exists():
+        try:
+            loaded = load_json(str(counter_file))
+            maybe_next = int(loaded.get("next_model_number"))
+            if maybe_next > 0:
+                current_next = max(current_next, maybe_next)
+        except Exception:
+            current_next = derived_next
+
+    model_version = f"v_model_{current_next:0{max(1, int(width))}d}"
+
+    ensure_parent(counter_path)
+    save_json({"next_model_number": int(current_next + 1)}, counter_path)
+    return model_version
 
 
 def register_version(

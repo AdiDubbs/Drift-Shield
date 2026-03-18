@@ -8,7 +8,6 @@ import json
 import platform
 import statistics
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -166,11 +165,23 @@ def _pct(values: list[float], q: float) -> float:
 
 def cmd_load_test(args: argparse.Namespace) -> None:
     url = f"{args.url}/predict"
-    payload = {"schema_version": 1, "transaction_features": {}, "request_id": str(uuid.uuid4())}
+    cfg = load_yaml("config.yaml")
+    _ensure_processed_splits(cfg)
+    target_col = cfg["data"]["target_col"]
+
+    df = pd.read_csv("data/processed/test.csv")
+    X = df.drop(columns=[target_col])
+    if len(X) == 0:
+        raise RuntimeError("Cannot run load test: test split is empty")
+
+    payloads = [
+        {"schema_version": 1, "transaction_features": X.iloc[i].to_dict()}
+        for i in range(len(X))
+    ]
 
     print(f"Warming up ({args.warmup} requests)...")
-    for _ in range(args.warmup):
-        _one_request(url, payload, args.timeout)
+    for i in range(args.warmup):
+        _one_request(url, payloads[i % len(payloads)], args.timeout)
 
     print(f"Load test: {args.requests} requests @ concurrency {args.concurrency}")
     lat_s: list[float] = []
@@ -178,7 +189,10 @@ def cmd_load_test(args: argparse.Namespace) -> None:
     t_start = time.perf_counter()
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-        futs = [ex.submit(_one_request, url, payload, args.timeout) for _ in range(args.requests)]
+        futs = [
+            ex.submit(_one_request, url, payloads[i % len(payloads)], args.timeout)
+            for i in range(args.requests)
+        ]
         for f in as_completed(futs):
             ok, dt = f.result()
             lat_s.append(dt)

@@ -191,6 +191,17 @@ const ChartStatePane = ({ state, onRetry, height = 260 }) => {
     )
   }
 
+  if (state?.warmup) {
+    return (
+      <div className="flex items-center justify-center" style={{ height }}>
+        <div className="flex flex-col items-center gap-2 text-center">
+          <p className="typo-body-sm text-text-primary">Drift detector is warming up.</p>
+          <p className="typo-caption text-text-dimmed">No scored drift window yet.</p>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex items-center justify-center" style={{ height }}>
       <div className="flex flex-col items-center gap-3">
@@ -218,6 +229,29 @@ const LINE_COLORS = {
 const CHART_AXIS_TICK = { fontSize: 11, fill: 'var(--text-secondary)' }
 const CHART_GRID_STROKE = 'rgba(255,255,255,0.12)'
 
+const normalizeModelVersion = (version) => {
+  if (version == null) return null
+  const raw = String(version).trim()
+  if (!raw) return null
+  const lower = raw.toLowerCase()
+  if (raw === '—' || raw === '-' || lower === 'n/a' || lower === 'na' || lower === 'none' || lower === 'null') {
+    return null
+  }
+  const seq = /^v_model_(\d+)$/i.exec(raw)
+  if (seq) return `v_model_${Number(seq[1])}`
+  return raw
+}
+
+const formatModelVersion = (version, options = {}) => {
+  const normalized = normalizeModelVersion(version)
+  if (!normalized) return options.fallback ?? '—'
+  const schemaVersion = Number(options.schemaVersion)
+  if (Number.isFinite(schemaVersion) && schemaVersion >= 1) {
+    return `s${Math.trunc(schemaVersion)} · ${normalized}`
+  }
+  return normalized
+}
+
 export {
   StatCard,
   ChartCard,
@@ -231,4 +265,5 @@ export {
   ChartStatePane,
   getDriftStatusMeta,
   StatusBadge,
+  formatModelVersion,
 }

@@ -13,7 +13,11 @@ from sklearn.isotonic import IsotonicRegression
 from fraud_service.utils.io import load_yaml, save_json
 from fraud_service.uncertainty.conformal import fit_split_conformal, save_calib
 from fraud_service.drift.reference import build_reference_from_train_csv
-from fraud_service.modeling.registry import utc_tag, register_version, write_active_model
+from fraud_service.modeling.registry import (
+    generate_sequential_model_version,
+    register_version,
+    write_active_model,
+)
 
 
 def _load_split(path: str, target_col: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
@@ -63,6 +67,7 @@ def train_and_save(
     model_version: Optional[str] = None,
     train_data_path: Optional[str] = None,
     calib_data_path: Optional[str] = None,
+    drift_reference_data_path: Optional[str] = None,
 ) -> str:
     cfg = load_yaml(config_path)
 
@@ -71,8 +76,8 @@ def train_and_save(
     labels = list(cfg["conformal"]["labels"])
     seed = int(cfg["project"]["random_seed"])
 
-    train_path = train_data_path or "data/processed/train.csv"
-    calib_path = calib_data_path or "data/processed/calib.csv"
+    train_path = train_data_path or cfg.get("data", {}).get("train_csv_path", "data/processed/train.csv")
+    calib_path = calib_data_path or cfg.get("data", {}).get("calib_csv_path", "data/processed/calib.csv")
 
     X_train, y_train, feat_names_train = _load_split(train_path, target_col)
     X_calib, y_calib, feat_names_calib = _load_split(calib_path, target_col)
@@ -103,13 +108,19 @@ def train_and_save(
         labels=labels,
     )
 
-    if model_version is None:
-        model_version = f"v_{utc_tag()}"
-
     paths = cfg.get("paths", {})
     models_dir = paths.get("versions_dir", "artifacts/models/versions")
     manifest_path = paths.get("manifest_path", "artifacts/models/manifest.json")
+    version_counter_path = paths.get("version_counter_path", "artifacts/models/version_counter.json")
     active_model_path = paths.get("active_ptr", "artifacts/models/ACTIVE_MODEL.json")
+
+    if model_version is None:
+        model_version = generate_sequential_model_version(
+            manifest_path=manifest_path,
+            counter_path=version_counter_path,
+            versions_dir=models_dir,
+            width=int(cfg.get("model", {}).get("version_width", 4)),
+        )
 
     vdir = Path(models_dir) / model_version
     vdir.mkdir(parents=True, exist_ok=True)
@@ -121,12 +132,13 @@ def train_and_save(
     drift_ref_path_v = str(vdir / "drift_reference.json")
     ref_sample_path_v = str(vdir / "ref_sample.npy")
 
+    xgb.sklearn.XGBModel._get_type = lambda self: "classifier"
     model.save_model(model_path_v)
     joblib.dump(calibrator, calibrator_path_v)
     save_calib(calib, qhat_path=qhat_path_v, meta_path=meta_path_v)
 
     build_reference_from_train_csv(
-        train_csv_path=train_path,
+        train_csv_path=drift_reference_data_path or train_path,
         target_col=target_col,
         out_json_path=drift_ref_path_v,
         out_ref_sample_path=ref_sample_path_v,
@@ -162,6 +174,7 @@ def train_and_save(
         Path(legacy_qhat).parent.mkdir(parents=True, exist_ok=True)
         Path(legacy_drift).parent.mkdir(parents=True, exist_ok=True)
 
+        xgb.sklearn.XGBModel._get_type = lambda self: "classifier"
         model.save_model(legacy_model)
         joblib.dump(calibrator, legacy_cal)
         save_calib(calib, qhat_path=legacy_qhat, meta_path=legacy_meta)

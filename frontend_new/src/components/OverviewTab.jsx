@@ -11,8 +11,10 @@ import {
 
 export default function OverviewTab({
   stats,
+  systemStatus,
   metrics,
   driftScore,
+  driftReady = true,
   coverageGuarantee,
   rps,
   timeRange,
@@ -20,20 +22,34 @@ export default function OverviewTab({
   driftWarning = 0.5,
   driftCritical = 0.7,
 }) {
-  const { fraudProbChartData, chartData, currentMetrics } = metrics
+  const { fraudProbChartData, chartData, driftScoreData, currentMetrics } = metrics
 
-  const driftPct = ((driftScore ?? 0) * 100).toFixed(1)
-  const driftStatus = getDriftStatusMeta(driftScore, driftWarning, driftCritical)
+  const driftPct = driftReady ? ((driftScore ?? 0) * 100).toFixed(1) : 'warming up'
+  const driftStatus = getDriftStatusMeta(driftScore ?? 0, driftWarning, driftCritical)
   const coverage = coverageGuarantee != null
     ? `${(coverageGuarantee * 100).toFixed(1)}`
     : null
 
   return (
     <div className="space-y-5">
+      <div className="flex justify-between items-start">
+        <div>
+          <h1 className="typo-title text-text-primary">Overview</h1>
+          <p className="typo-subtitle text-text-dimmed mt-1">Real-time model health &amp; fraud detection summary</p>
+          <p className="typo-caption text-text-dimmed mt-2 max-w-2xl">
+            DriftShield monitors a live fraud detection model — tracking when incoming transaction patterns shift away from what the model was trained on, and automatically retraining before accuracy degrades.
+          </p>
+        </div>
+        {systemStatus?.retraining?.is_active && (
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-400 animate-pulse">
+            <span className="h-2 w-2 rounded-full bg-blue-400" />
+            <span className="typo-caption-bold">Retraining Active</span>
+          </div>
+        )}
+      </div>
+
       <div>
-        <h1 className="typo-title text-text-primary">Overview</h1>
-        <p className="typo-subtitle text-text-dimmed mt-1">Real-time model health &amp; fraud detection summary</p>
-        <p className="typo-caption text-text-dimmed mt-2">
+        <p className="typo-caption text-text-dimmed">
           Drift state uses a single policy: <span className="text-text-primary">Nominal</span> below {(driftWarning * 100).toFixed(0)}%, <span className="text-text-primary">Warning</span> at {(driftWarning * 100).toFixed(0)}%+, and <span className="text-text-primary">Critical</span> at {(driftCritical * 100).toFixed(0)}%+ (retrain risk).
         </p>
       </div>
@@ -44,15 +60,15 @@ export default function OverviewTab({
           value={stats?.total_requests?.toLocaleString() ?? '0'}
           unit="RPS"
           sub={rps != null ? `${rps.toFixed(1)} req/s` : 'Calculating…'}
-          tooltip="Total transactions scored by the fraud model. RPS shows the current throughput."
+          tooltip="Total number of transactions the fraud model has scored since startup. RPS (requests per second) shows current live throughput."
           delay={1}
         />
         <StatCard
           label="Drift Score"
           value={driftPct}
-          unit="%"
-          sub={`${currentMetrics.featureDriftSoft} soft · ${currentMetrics.featureDriftHard} hard features`}
-          tooltip={`How much incoming transaction patterns have shifted from training data. Above ${(driftCritical * 100).toFixed(0)}% triggers a retrain.`}
+          unit={driftReady ? '%' : undefined}
+          sub={driftReady ? `${currentMetrics.featureDriftSoft} warned · ${currentMetrics.featureDriftHard} critical features` : 'No scored drift window yet'}
+          tooltip={`Measures how much live transaction patterns have diverged from the data the model was trained on. A score above ${(driftCritical * 100).toFixed(0)}% means the model may no longer be reliable and a retrain is triggered.`}
           status={driftStatus}
           hero
           delay={2}
@@ -63,7 +79,7 @@ export default function OverviewTab({
           unit={coverage != null ? '%' : undefined}
           accentClass="text-mint"
           sub={coverageGuarantee != null ? `α = ${(100 - coverageGuarantee * 100).toFixed(1)}%` : 'Awaiting model'}
-          tooltip="Conformal coverage guarantee — the model's prediction set contains the true label at least this fraction of the time."
+          tooltip="How often the model is statistically guaranteed to be correct. At 95%, no more than 1 in 20 predictions should be wrong — this bound is enforced by conformal calibration at training time."
           delay={3}
         />
       </div>
@@ -107,7 +123,7 @@ export default function OverviewTab({
         </ChartCard>
 
         <ChartCard title="Drift Score over Time">
-          {chartData.length === 0 ? (
+          {driftScoreData.length === 0 ? (
             <ChartStatePane state={metrics.chartStates.drift} onRetry={metrics.refresh} height={380} />
           ) : (
             <ResponsiveContainer width="100%" height={380}>

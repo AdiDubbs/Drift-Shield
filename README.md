@@ -23,7 +23,7 @@ Fraud detection API with real-time drift monitoring, uncertainty-aware predictio
 The fastest way to run the full stack (API + Dashboard + Monitoring):
 
 ```bash
-docker compose --profile monitoring up --build
+docker compose up --build
 ```
 
 **Services:**
@@ -62,24 +62,27 @@ If you prefer to run services manually:
 
 ## Core API Endpoints
 
-- `GET /health`
-- `POST /predict`
-- `GET /dashboard/stats`
-- `POST /retrain`
-- `GET /models/info`
-- `GET /prometheus/{path}`
+- `GET /health` — liveness check
+- `GET /ready` — readiness check (confirms model is loaded)
+- `POST /predict` — score a transaction
+- `GET /dashboard/stats` — summary stats for the frontend
+- `GET /models/info` — active/shadow model metadata
+- `GET /system/status` — full system state (drift, retraining, promotion policy)
+- `POST /retrain` — manually trigger a retrain request
+- `GET /prometheus/{path}` — proxied Prometheus metrics endpoint
 
 ## Docker Details
 
-Start API + watcher + frontend + Prometheus + IEEE traffic:
+The compose stack includes: API, watcher (Credit Card domain), watcher_ieee (IEEE domain), Credit Card + IEEE traffic loops, frontend, Prometheus, and Grafana.
 
 ```bash
 docker compose up --build
 ```
 
-The `ieee_traffic` service:
-- prepares `data/processed/ieee_adapted.csv` from `ieee-fraud-detection/train_transaction.csv` (if provided)
-- continuously sends traffic to `POST /predict` so charts stay populated
+The traffic services:
+- `ieee_traffic` / `ieee_native_traffic`: continuously send transactions to `POST /predict` so charts stay populated
+- `ieee_traffic` uses the adapted CSV format; `ieee_native_traffic` uses the raw IEEE feature set
+- Both require `ieee-fraud-detection/train_transaction.csv` to be present for the full demo
 
 ## Dashboard Data Notes
 

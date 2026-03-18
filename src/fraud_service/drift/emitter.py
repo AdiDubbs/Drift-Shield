@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -17,11 +19,13 @@ class RetrainEmitter:
     cooldown_seconds: float = 600.0
     max_pending: int = 1
     marker_filename: str = ".last_emit"
+    _lock: threading.Lock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._dir = Path(self.request_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._marker = self._dir / self.marker_filename
+        self._lock = threading.Lock()
 
     def emit(
         self,
@@ -36,43 +40,57 @@ class RetrainEmitter:
         extra: Optional[Dict[str, Any]] = None,
         **_ignored: Any,
     ) -> bool:
-        now = time.time()
+        with self._lock:
+            now = time.time()
 
-        last = self._last_emit_time()
-        if last is not None and (now - last) < float(self.cooldown_seconds):
-            return False
+            last = self._last_emit_time()
+            if last is not None and (now - last) < float(self.cooldown_seconds):
+                return False
 
-        if len(self._pending_requests()) >= int(self.max_pending):
-            return False
+            if len(self._pending_requests()) >= int(self.max_pending):
+                return False
 
-        ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
-        path = self._dir / f"retrain_request_{ts}.json"
+            ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
+            unique = f"{time.time_ns() % 1_000_000_000:09d}_{uuid.uuid4().hex[:8]}"
+            path = self._dir / f"retrain_request_{ts}_{unique}.json"
 
-        payload: Dict[str, Any] = dict(
-            created_at_unix=now,
-            created_at=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
-            reason=str(reason),
-            drift_score=float(drift_score),
-            model_version=str(model_version),
-            action_code=str(action_code),
-            drift=drift,
-        )
-        if p_fraud is not None:
-            payload["p_fraud"] = float(p_fraud)
-        if request_id is not None:
-            payload["request_id"] = str(request_id)
-        if extra:
-            payload["extra"] = extra
+            payload: Dict[str, Any] = dict(
+                created_at_unix=now,
+                created_at=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
+                reason=str(reason),
+                drift_score=float(drift_score),
+                model_version=str(model_version),
+                action_code=str(action_code),
+                drift=drift,
+            )
+            if p_fraud is not None:
+                payload["p_fraud"] = float(p_fraud)
+            if request_id is not None:
+                payload["request_id"] = str(request_id)
+            if extra:
+                payload["extra"] = extra
 
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp.replace(path)
+            tmp = self._dir / f".{path.name}.{uuid.uuid4().hex}.tmp"
+            try:
+                tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                tmp.replace(path)
+            except OSError as e:
+                logger.warning("Failed to write retrain request %s: %s", path, e)
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except OSError:
+                    pass
+                return False
 
-        self._touch_marker(now)
-        return True
+            self._touch_marker(now)
+            return True
 
     def _pending_requests(self) -> list[Path]:
         return sorted(self._dir.glob("retrain_request_*.json"))
+
+    def pending_requests(self) -> list[Path]:
+        return self._pending_requests()
 
     def _last_emit_time(self) -> Optional[float]:
         try:

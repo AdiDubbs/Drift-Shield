@@ -1,9 +1,9 @@
-import React, { useState } from 'react'
-import { Send, RotateCcw, AlertTriangle, CheckCircle, ChevronRight, Clock, ChevronDown, ChevronUp } from 'lucide-react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { Send, RotateCcw, AlertTriangle, CheckCircle, ChevronRight, Clock, ChevronDown } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { apiClient } from '../api/client'
 import { Button } from './ui/button'
-
+import { formatModelVersion } from './shared'
 
 const FIELD_GROUPS = [
   {
@@ -37,7 +37,6 @@ const DEFAULT_TX = {
   M1: 'T', M2: 'T', M3: 'T',
 }
 
-
 const PRESETS = [
   {
     label: 'Low Risk',
@@ -66,14 +65,138 @@ const ADVANCED_OVERRIDE_FIELDS = [
   { key: 'V17', label: 'V17 override', hint: 'M3 flag-derived feature.' },
 ]
 
-export default function TestPanel() {
+const NATIVE_DEFAULT_SEEDS = {
+  TransactionAmt: 100.5,
+  dist1: 0.0,
+  dist2: 0.0,
+  card1: 14000,
+  card2: 250,
+  C1: 1.0,
+  D1: 0.0,
+}
+
+const buildNativePayloadFromFeatureNames = (featureNames) => {
+  const payload = {}
+  ;(featureNames || []).forEach((name) => {
+    payload[name] = 0
+  })
+
+  Object.entries(NATIVE_DEFAULT_SEEDS).forEach(([key, value]) => {
+    if (Object.prototype.hasOwnProperty.call(payload, key)) {
+      payload[key] = value
+    }
+  })
+  return payload
+}
+
+const safeParsePayload = (rawText) => {
+  try {
+    const parsed = JSON.parse(rawText)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return { ok: true, payload: parsed }
+    }
+    return { ok: false, message: 'Payload must be a JSON object with key/value feature pairs.' }
+  } catch (error) {
+    return { ok: false, message: `Invalid JSON payload: ${error.message}` }
+  }
+}
+
+export default function TestPanel({ schemaVersion = 1, domainLabel = null, modelInfo = null }) {
   const [features, setFeatures] = useState(DEFAULT_TX)
   const [overridesOpen, setOverridesOpen] = useState(false)
   const [overrides, setOverrides] = useState({})
+  const [nativePayloadText, setNativePayloadText] = useState('{}')
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [history, setHistory] = useState([])
+
+  const nativeSeededSignatureRef = useRef('')
+
+  const activeFeatureNames = useMemo(() => {
+    const names = modelInfo?.active?.feature_names
+    if (!Array.isArray(names)) return []
+    return names.map((name) => String(name))
+  }, [modelInfo])
+
+  const activeFeatureSignature = useMemo(
+    () => activeFeatureNames.join('|'),
+    [activeFeatureNames]
+  )
+
+  const nativeMode = schemaVersion !== 1
+  const nativeReady = !nativeMode || activeFeatureNames.length > 0
+  const nativePreviewKeys = activeFeatureNames.slice(0, 8)
+  const nativeValidation = useMemo(() => {
+    if (!nativeMode) {
+      return {
+        valid: true,
+        blockingReason: null,
+        parsedPayload: null,
+        missingKeys: [],
+        extraKeys: [],
+        invalidNumberKeys: [],
+      }
+    }
+    if (!nativeReady) {
+      return {
+        valid: false,
+        blockingReason: 'Domain feature list is still loading. Wait for model info and try again.',
+        parsedPayload: null,
+        missingKeys: [],
+        extraKeys: [],
+        invalidNumberKeys: [],
+      }
+    }
+
+    const parsed = safeParsePayload(nativePayloadText)
+    if (!parsed.ok) {
+      return {
+        valid: false,
+        blockingReason: parsed.message,
+        parsedPayload: null,
+        missingKeys: [],
+        extraKeys: [],
+        invalidNumberKeys: [],
+      }
+    }
+
+    const payload = parsed.payload
+    const payloadKeys = Object.keys(payload)
+    const requiredSet = new Set(activeFeatureNames)
+    const missingKeys = activeFeatureNames.filter((name) => !Object.prototype.hasOwnProperty.call(payload, name))
+    const extraKeys = payloadKeys.filter((name) => !requiredSet.has(name))
+    const invalidNumberKeys = activeFeatureNames.filter((name) => {
+      if (!Object.prototype.hasOwnProperty.call(payload, name)) return false
+      const value = payload[name]
+      return typeof value !== 'number' || !Number.isFinite(value)
+    })
+    const valid = missingKeys.length === 0 && extraKeys.length === 0 && invalidNumberKeys.length === 0
+    const blockingReason = valid
+      ? null
+      : missingKeys.length > 0
+        ? `Missing ${missingKeys.length} required feature key(s).`
+        : extraKeys.length > 0
+          ? `Found ${extraKeys.length} unknown feature key(s).`
+          : `Found ${invalidNumberKeys.length} non-numeric or invalid value(s).`
+
+    return {
+      valid,
+      blockingReason,
+      parsedPayload: payload,
+      missingKeys,
+      extraKeys,
+      invalidNumberKeys,
+    }
+  }, [nativeMode, nativeReady, nativePayloadText, activeFeatureNames])
+
+  useEffect(() => {
+    if (!nativeMode || activeFeatureNames.length === 0) return
+    if (nativeSeededSignatureRef.current === activeFeatureSignature) return
+    const seeded = buildNativePayloadFromFeatureNames(activeFeatureNames)
+    setNativePayloadText(JSON.stringify(seeded, null, 2))
+    nativeSeededSignatureRef.current = activeFeatureSignature
+  }, [nativeMode, activeFeatureNames, activeFeatureSignature])
 
   const handleChange = (key, value) => {
     if (NUMERIC_FIELDS.has(key)) {
@@ -108,12 +231,29 @@ export default function TestPanel() {
     setLoading(true)
     setError(null)
     setResult(null)
+
+    let payload
+    let amountForHistory = null
+
+    if (nativeMode) {
+      if (!nativeValidation.valid || !nativeValidation.parsedPayload) {
+        setError(nativeValidation.blockingReason || 'Fix payload validation errors and try again.')
+        setLoading(false)
+        return
+      }
+      payload = nativeValidation.parsedPayload
+      const amountCandidate = Number(payload.TransactionAmt ?? payload.Amount)
+      amountForHistory = Number.isFinite(amountCandidate) ? amountCandidate : null
+    } else {
+      payload = toModelPayload(features)
+      amountForHistory = Number(features.TransactionAmt)
+    }
+
     try {
-      const payload = toModelPayload(features)
-      const res = await apiClient.predict(payload)
+      const res = await apiClient.predict(payload, schemaVersion)
       setResult(res)
       setHistory((prev) => [
-        { ts: new Date(), result: res, amt: features.TransactionAmt },
+        { ts: new Date(), result: res, amt: amountForHistory, schema: schemaVersion },
         ...prev.slice(0, 4),
       ])
     } catch (e) {
@@ -124,10 +264,28 @@ export default function TestPanel() {
   }
 
   const resetFeatures = () => {
+    setResult(null)
+    setError(null)
+    if (nativeMode) {
+      if (activeFeatureNames.length > 0) {
+        setNativePayloadText(JSON.stringify(buildNativePayloadFromFeatureNames(activeFeatureNames), null, 2))
+      } else {
+        setNativePayloadText('{}')
+      }
+      return
+    }
     setFeatures(DEFAULT_TX)
     setOverrides({})
     setOverridesOpen(false)
-    setResult(null)
+  }
+
+  const formatNativeJson = () => {
+    const parsed = safeParsePayload(nativePayloadText)
+    if (!parsed.ok) {
+      setError(parsed.message)
+      return
+    }
+    setNativePayloadText(JSON.stringify(parsed.payload, null, 2))
     setError(null)
   }
 
@@ -137,116 +295,230 @@ export default function TestPanel() {
   const isFraud = result?.prediction === 1 || String(result?.prediction ?? '').toLowerCase() === 'fraud'
   const hasFraudProbability = typeof result?.p_fraud === 'number' && Number.isFinite(result.p_fraud)
   const pFraud = result?.p_fraud ?? 0
+  const canSubmit = !loading && (!nativeMode || (nativeReady && nativeValidation.valid))
+  const activeDomainLabel = domainLabel || `Domain ${schemaVersion}`
+  const getDomainLabelFor = (value) => {
+    const normalized = Number(value)
+    if (normalized === 1) return 'Credit Card'
+    if (normalized === 2) return 'IEEE Fraud'
+    return `Domain ${value}`
+  }
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="typo-title text-text-primary">Transaction Testing</h1>
         <p className="typo-subtitle text-text-dimmed mt-1">Submit a transaction to get a live fraud prediction</p>
-        <p className="typo-caption text-text-dimmed mt-2">
-          Start with basic inputs. Expand advanced controls only when you need precise feature overrides.
-        </p>
+        <p className="typo-caption text-text-dimmed mt-1">Current domain: {activeDomainLabel}</p>
+        {nativeMode ? (
+          <>
+            <p className="typo-caption text-text-dimmed mt-2">
+              Native payload mode uses the active model feature list for this domain. Keep keys exact.
+            </p>
+            <p className="typo-caption text-text-dimmed mt-1">
+              Expected feature keys: {activeFeatureNames.length > 0 ? activeFeatureNames.length : 'loading...'}
+            </p>
+            {!nativeReady ? (
+              <p className="typo-caption text-[var(--accent-amber-vibrant)] mt-1">
+                Waiting for feature names from `/models/info` for {activeDomainLabel}.
+              </p>
+            ) : null}
+          </>
+        ) : (
+          <p className="typo-caption text-text-dimmed mt-2">
+            Start with basic inputs or pick a preset scenario. M-flags are transaction verification checks (T = pass, F = fail). The V-features in Advanced Overrides are anonymized, PCA-derived model inputs from the original dataset.
+          </p>
+        )}
       </div>
 
       <div className={cn('grid gap-8', result || error ? 'grid-cols-[1fr_400px]' : 'grid-cols-1')}>
         <div className="card card-glass p-6 space-y-6">
           <div className="flex items-center justify-between">
-            <h2 className="typo-overline text-text-secondary">Transaction Features</h2>
+            <h2 className="typo-overline text-text-secondary">
+              {nativeMode ? 'Native Feature Payload' : 'Transaction Features'}
+            </h2>
             <Button onClick={resetFeatures} variant="secondary" size="sm" className="gap-1.5">
               <RotateCcw className="h-3 w-3" />
               Reset
             </Button>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="typo-overline text-text-muted shrink-0">Preset:</span>
-            <div className="flex flex-wrap gap-1.5">
-              {PRESETS.map((p) => (
-                <button
-                  key={p.label}
-                  type="button"
-                  onClick={() => { setFeatures(p.tx); setResult(null); setError(null) }}
-                  className="rounded-full border border-border-dim bg-[var(--surface-frost-weak)] min-h-11 px-3.5 typo-body-sm text-text-secondary hover:text-text-primary hover:border-border-medium transition-colors"
-                >
-                  {p.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="space-y-6 max-h-[540px] overflow-y-auto scrollbar-thin pr-1">
-            {FIELD_GROUPS.map((group) => (
-              <div key={group.label}>
-                <p className="typo-overline text-text-muted mb-3 pb-1.5 border-b border-border-dim">{group.label}</p>
-                <div className="grid grid-cols-3 gap-x-4 gap-y-4">
-                  {group.fields.map(({ key, label, type, options }) => (
-                    <div key={key} className="space-y-1.5">
-                      <label htmlFor={`tx-field-${key}`} className="typo-overline text-text-muted">{label}</label>
-                      {type === 'select' ? (
-                        <select
-                          id={`tx-field-${key}`}
-                          value={features[key]}
-                          onChange={(e) => handleChange(key, e.target.value)}
-                          className="w-full rounded-md border border-border-dim bg-background px-2.5 py-1.5 typo-body text-text-primary outline-none focus:border-[var(--border-focus)] focus:ring-1 focus:ring-[var(--border-focus)] transition-colors"
-                        >
-                          {options.map((o) => <option key={o} value={o}>{o}</option>)}
-                        </select>
-                      ) : (
-                        <input
-                          id={`tx-field-${key}`}
-                          type={type}
-                          value={features[key]}
-                          onChange={(e) => handleChange(key, e.target.value)}
-                          className="w-full rounded-md border border-border-dim bg-background px-2.5 py-1.5 typo-body text-text-primary placeholder-[var(--text-muted)] outline-none focus:border-[var(--border-focus)] focus:ring-1 focus:ring-[var(--border-focus)] transition-colors"
-                        />
-                      )}
-                    </div>
+          {!nativeMode ? (
+            <>
+              <div className="flex items-center gap-2">
+                <span className="typo-overline text-text-muted shrink-0">Preset:</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {PRESETS.map((p) => (
+                    <button
+                      key={p.label}
+                      type="button"
+                      onClick={() => { setFeatures(p.tx); setResult(null); setError(null) }}
+                      className="rounded-full border border-border-dim bg-[var(--surface-frost-weak)] min-h-11 px-3.5 typo-body-sm text-text-secondary hover:text-text-primary hover:border-border-medium transition-colors"
+                    >
+                      {p.label}
+                    </button>
                   ))}
                 </div>
               </div>
-            ))}
 
-            <div className="rounded-xl border border-border-dim bg-[var(--surface-frost-weak)] p-3">
-              <button
-                type="button"
-                onClick={() => setOverridesOpen((v) => !v)}
-                className="w-full min-h-11 flex items-center justify-between gap-2"
-                aria-expanded={overridesOpen}
-                aria-controls="advanced-overrides-panel"
-              >
-                <span className="typo-overline text-text-secondary">Advanced model feature overrides</span>
-                {overridesOpen ? <ChevronUp className="h-4 w-4 text-text-muted" /> : <ChevronDown className="h-4 w-4 text-text-muted" />}
-              </button>
-              <p className="typo-caption text-text-dimmed mt-1">
-                Overrides can force edge-case simulations and may increase drift/retrain pressure.
-              </p>
-              {overridesOpen ? (
-                <div id="advanced-overrides-panel" className="mt-3 space-y-3">
-                  {ADVANCED_OVERRIDE_FIELDS.map((field) => (
-                    <div key={field.key} className="space-y-1">
-                      <label htmlFor={`override-field-${field.key}`} className="typo-overline text-text-muted">{field.label}</label>
-                      <input
-                        id={`override-field-${field.key}`}
-                        type="number"
-                        value={overrides[field.key] ?? ''}
-                        onChange={(e) => setOverrides((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                        className="w-full rounded-md border border-border-dim bg-background px-2.5 py-1.5 typo-body text-text-primary placeholder-[var(--text-muted)] outline-none focus:border-[var(--border-focus)] focus:ring-1 focus:ring-[var(--border-focus)] transition-colors"
-                        placeholder="Leave blank to use mapped value"
-                      />
-                      <p className="typo-caption text-text-dimmed">{field.hint}</p>
+              <div className="space-y-6 max-h-[540px] overflow-y-auto scrollbar-thin rounded-xl border border-border-dim bg-[var(--surface-frost-weak)] p-5">
+                {FIELD_GROUPS.map((group) => (
+                  <div key={group.label}>
+                    <p className="typo-overline text-text-muted mb-4 pb-2 border-b border-border-dim">{group.label}</p>
+                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-x-5 gap-y-5">
+                      {group.fields.map(({ key, label, type, options }) => (
+                        <div key={key} className="space-y-1.5 focus-within:relative z-10">
+                          <label htmlFor={`tx-field-${key}`} className="typo-overline text-text-muted transition-colors">{label}</label>
+                          {type === 'select' ? (
+                            <select
+                              id={`tx-field-${key}`}
+                              value={features[key]}
+                              onChange={(e) => handleChange(key, e.target.value)}
+                              className="w-full rounded-lg border border-border-dim bg-background px-3 py-2 typo-body text-text-primary outline-none focus:border-[var(--border-focus)] focus:ring-2 focus:ring-[var(--border-focus)]/20 transition-all shadow-sm"
+                            >
+                              {options.map((o) => <option key={o} value={o}>{o}</option>)}
+                            </select>
+                          ) : (
+                            <input
+                              id={`tx-field-${key}`}
+                              type={type}
+                              value={features[key]}
+                              onChange={(e) => handleChange(key, e.target.value)}
+                              className="w-full rounded-lg border border-border-dim bg-background px-3 py-2 typo-body text-text-primary placeholder-[var(--text-muted)] outline-none focus:border-[var(--border-focus)] focus:ring-2 focus:ring-[var(--border-focus)]/20 transition-all shadow-sm"
+                            />
+                          )}
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                  <div className="flex justify-end">
-                    <Button variant="secondary" size="sm" onClick={() => setOverrides({})}>
-                      Clear overrides
-                    </Button>
+                  </div>
+                ))}
+              </div>
+
+              <div className={cn(
+                'rounded-xl border transition-all duration-200',
+                overridesOpen ? 'border-border-medium bg-[var(--surface-hover)] shadow-sm' : 'border-border-dim bg-[var(--surface-frost-weak)]'
+              )}>
+                <button
+                  type="button"
+                  onClick={() => setOverridesOpen((v) => !v)}
+                  className="w-full flex items-center justify-between gap-2 p-4 outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-focus)]/50 rounded-xl"
+                  aria-expanded={overridesOpen}
+                  aria-controls="advanced-overrides-panel"
+                >
+                  <div className="flex flex-col items-start gap-1">
+                    <span className={cn('typo-overline transition-colors', overridesOpen ? 'text-text-primary' : 'text-text-secondary')}>
+                      Advanced model feature overrides
+                    </span>
+                    <p className="typo-caption text-text-dimmed text-left">
+                      Directly set V-feature values (anonymized PCA-derived model inputs) to simulate edge cases. Unusual values will contribute to the drift score and may accelerate retraining.
+                    </p>
+                  </div>
+                  <div className={cn(
+                    'flex items-center justify-center w-8 h-8 rounded-full bg-background/50 border border-border-dim transition-transform duration-200 shrink-0',
+                    overridesOpen ? 'rotate-180 bg-background' : ''
+                  )}>
+                    <ChevronDown className="h-4 w-4 text-text-secondary" />
+                  </div>
+                </button>
+
+                <div
+                  id="advanced-overrides-panel"
+                  className={cn(
+                    'grid transition-all duration-300 ease-in-out',
+                    overridesOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0 pointer-events-none'
+                  )}
+                >
+                  <div className="overflow-hidden">
+                    <div className="p-4 pt-0 space-y-4 border-t border-border-dim/50 mt-1">
+                      {ADVANCED_OVERRIDE_FIELDS.map((field) => (
+                        <div key={field.key} className="space-y-1.5 focus-within:relative z-10">
+                          <label htmlFor={`override-field-${field.key}`} className="flex items-baseline justify-between">
+                            <span className="typo-overline text-text-muted">{field.label}</span>
+                            <span className="typo-caption text-text-dimmed">{field.hint}</span>
+                          </label>
+                          <input
+                            id={`override-field-${field.key}`}
+                            type="number"
+                            value={overrides[field.key] ?? ''}
+                            onChange={(e) => setOverrides((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                            className="w-full rounded-lg border border-border-dim bg-background px-3 py-2.5 typo-body text-text-primary placeholder-[var(--text-dimmed)] outline-none focus:border-[var(--border-focus)] focus:ring-2 focus:ring-[var(--border-focus)]/20 transition-all shadow-sm"
+                            placeholder="Leave blank to use model mapping"
+                          />
+                        </div>
+                      ))}
+                      <div className="flex justify-end pt-2">
+                        <Button variant="ghost" size="sm" onClick={() => setOverrides({})} className="text-text-muted hover:text-text-primary">
+                          Clear overrides
+                        </Button>
+                      </div>
+                    </div>
                   </div>
                 </div>
-              ) : null}
+              </div>
+            </>
+          ) : (
+            <div className="space-y-3">
+              <div className="rounded-xl border border-border-dim bg-[var(--surface-frost-weak)] p-3">
+                <p className="typo-caption text-text-dimmed">
+                  Native domain payload editor. Send the exact model features for {activeDomainLabel}.
+                </p>
+                {nativePreviewKeys.length > 0 ? (
+                  <p className="typo-caption text-text-dimmed mt-1">
+                    Sample keys: {nativePreviewKeys.join(', ')}
+                  </p>
+                ) : null}
+                <p className="typo-caption text-text-dimmed mt-1">
+                  Required keys: {activeFeatureNames.length}
+                </p>
+              </div>
+              {!nativeValidation.valid ? (
+                <div className="rounded-xl border border-[var(--status-warning-border)] bg-[var(--status-warning-bg)] p-3">
+                  <p className="typo-caption text-[var(--status-warning-fg)]">
+                    {nativeValidation.blockingReason}
+                  </p>
+                  {nativeValidation.missingKeys.length > 0 ? (
+                    <p className="typo-caption text-[var(--status-warning-fg)] mt-1">
+                      Missing examples: {nativeValidation.missingKeys.slice(0, 5).join(', ')}
+                    </p>
+                  ) : null}
+                  {nativeValidation.extraKeys.length > 0 ? (
+                    <p className="typo-caption text-[var(--status-warning-fg)] mt-1">
+                      Unknown examples: {nativeValidation.extraKeys.slice(0, 5).join(', ')}
+                    </p>
+                  ) : null}
+                  {nativeValidation.invalidNumberKeys.length > 0 ? (
+                    <p className="typo-caption text-[var(--status-warning-fg)] mt-1">
+                      Invalid value examples: {nativeValidation.invalidNumberKeys.slice(0, 5).join(', ')}
+                    </p>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="rounded-xl border border-[rgba(var(--accent-mint-rgb),0.35)] bg-[rgba(var(--accent-mint-rgb),0.10)] p-3">
+                  <p className="typo-caption text-[var(--accent-mint-vibrant)]">
+                    Payload matches the active domain contract and is ready to submit.
+                  </p>
+                </div>
+              )}
+              <textarea
+                value={nativePayloadText}
+                onChange={(event) => setNativePayloadText(event.target.value)}
+                className="h-[420px] w-full resize-y rounded-xl border border-border-dim bg-background px-3 py-2 typo-mono-sm text-text-primary outline-none focus:border-[var(--border-focus)] focus:ring-2 focus:ring-[var(--border-focus)]/20"
+                placeholder='{"feature_a": 0.0, "feature_b": 1.0}'
+              />
+              <div className="flex justify-end">
+                <Button variant="ghost" size="sm" onClick={formatNativeJson}>
+                  Format JSON
+                </Button>
+              </div>
             </div>
-          </div>
+          )}
 
-          <Button onClick={handleSubmit} disabled={loading} className="w-full">
+          <Button
+            onClick={handleSubmit}
+            disabled={!canSubmit}
+            title={nativeMode && !nativeValidation.valid ? nativeValidation.blockingReason : undefined}
+            className="w-full"
+          >
             {loading ? (
               <>
                 <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
@@ -328,7 +600,7 @@ export default function TestPanel() {
 
               <div className="card card-glass divide-y divide-[var(--border-dim)]">
                 <ResultRow label="Coverage" value={result.coverage != null ? `${(result.coverage * 100).toFixed(1)}%` : '—'} />
-                <ResultRow label="Model Version" value={result.model_version ?? '—'} />
+                <ResultRow label="Model Version" value={formatModelVersion(result.model_version, { schemaVersion })} />
                 {result.prediction_set && (
                   <ResultRow
                     label="Prediction Set"
@@ -385,15 +657,19 @@ export default function TestPanel() {
                 const hFraud = h.result?.prediction === 1 || String(h.result?.prediction ?? '').toLowerCase() === 'fraud'
                 const hHasP = typeof h.result?.p_fraud === 'number' && Number.isFinite(h.result.p_fraud)
                 const hP = h.result?.p_fraud ?? 0
+                const hasAmount = Number.isFinite(Number(h.amt))
                 return (
                   <div key={i} className="flex items-center justify-between px-4 py-2">
                     <div className="flex items-center gap-2">
                       <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{
                         backgroundColor: hFraud ? 'var(--accent-crimson-vibrant)' : 'var(--accent-mint-vibrant)'
                       }} />
-                      <span className="typo-body-sm text-text-muted">${Number(h.amt).toFixed(2)}</span>
+                      <span className="typo-body-sm text-text-muted">{hasAmount ? `$${Number(h.amt).toFixed(2)}` : 'n/a'}</span>
                     </div>
                     <div className="flex items-center gap-3">
+                      <span className="typo-caption text-text-dimmed">
+                        {getDomainLabelFor(h.schema ?? schemaVersion)}
+                      </span>
                       <span className="typo-mono-sm" style={{
                         color: hFraud ? 'var(--accent-crimson-vibrant)' : 'var(--accent-mint-vibrant)'
                       }}>

@@ -44,25 +44,27 @@ const StatStrip = ({ label, value, unit, accent }) => (
 
 export default function OperationsTab({
   metrics,
+  driftReady = true,
   timeRange,
   setTimeRange,
   driftWarning = 0.5,
   driftCritical = 0.7,
 }) {
-  const { latencyChartData, chartData, fraudProbChartData } = metrics
+  const { latencyChartData, chartData, driftScoreData, fraudProbChartData } = metrics
 
   // Latest values for the stat strip
   const lastLatency = latencyChartData.at(-1)
   const lastChart = chartData.at(-1)
+  const lastDrift = driftScoreData.at(-1)
   const lastFraud = fraudProbChartData.at(-1)
 
   const latencyP99 = lastLatency?.p99 != null ? lastLatency.p99.toFixed(1) : '—'
   const latencyP50 = lastLatency?.p50 != null ? lastLatency.p50.toFixed(1) : '—'
   const currentRps = lastChart?.rps != null ? lastChart.rps.toFixed(2) : '—'
-  const driftPct = lastChart?.drift != null ? `${(lastChart.drift * 100).toFixed(1)}` : '—'
+  const driftPct = driftReady && lastDrift?.value != null ? `${(lastDrift.value * 100).toFixed(1)}` : 'warming up'
   const fraudP50 = lastFraud?.p50 != null ? lastFraud.p50.toFixed(3) : '—'
 
-  const driftVal = lastChart?.drift ?? 0
+  const driftVal = driftReady ? (lastDrift?.value ?? 0) : 0
   const driftStatus = getDriftStatusMeta(driftVal, driftWarning, driftCritical)
   return (
     <div className="space-y-6">
@@ -86,7 +88,7 @@ export default function OperationsTab({
         <StatStrip
           label="Drift Score"
           value={driftPct}
-          unit="%"
+          unit={driftReady ? "%" : undefined}
           accent={driftStatus.label === 'Nominal' ? 'var(--accent-mint-vibrant)' : undefined}
         />
         <StatStrip label="Fraud p50" value={fraudP50} />
@@ -115,9 +117,9 @@ export default function OperationsTab({
         </ChartCard>
 
         <ChartCard title="Drift Score">
-          {chartData.length === 0 ? <ChartStatePane state={metrics.chartStates.drift} onRetry={metrics.refresh} /> : (
+          {driftScoreData.length === 0 ? <ChartStatePane state={metrics.chartStates.drift} onRetry={metrics.refresh} /> : (
             <ResponsiveContainer width="100%" height={260}>
-              <AreaChart data={chartData} {...CHART_COMMON}>
+              <AreaChart data={driftScoreData.map((point) => ({ ...point, drift: point.value }))} {...CHART_COMMON}>
                 <defs>
                   <linearGradient id="driftFill" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="var(--accent-steel-vibrant)" stopOpacity={0.18} />
@@ -185,6 +187,7 @@ export default function OperationsTab({
           ]} />
         </ChartCard>
       </div>
+
     </div>
   )
 }
